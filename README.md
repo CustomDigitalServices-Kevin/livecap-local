@@ -72,8 +72,46 @@ si une cle est manquante ou invalide.
 
 ## Lancement
 
-*Sera complete en tache 6* : `launch.cmd` activera le venv, posera
-`NO_TORCH_COMPILE=1`, verifiera qu'Ollama tourne, et lancera `main.py`.
+```bash
+launch.cmd
+```
+
+`launch.cmd` : pose `NO_TORCH_COMPILE=1` (defense en profondeur, deja pose par
+`livecap/asr.py` et `main.py`), verifie qu'Ollama repond sur `localhost:11434`
+(le demarre en arriere-plan sinon, best-effort — `main.py` refait de toute
+facon la verification/relance autoritative via
+`livecap.translator.ensure_ollama_running`), puis lance
+`.venv\Scripts\python.exe main.py` avec les arguments passes tels quels.
+
+Usage direct de `main.py` (`launch.cmd` transmet les memes arguments) :
+
+```bash
+# Mode normal : capture WASAPI (loopback + micro), overlay PyQt6
+launch.cmd
+launch.cmd --config config.yaml --device cuda
+
+# Rejoue un fichier wav au lieu de capturer (court-circuite capture.py) :
+# decoupe en blocs de 80 ms, asr.flush() en fin de fichier, quitte proprement.
+launch.cmd --input-wav tests\fixtures\test_fr.wav
+
+# --no-overlay : headless, exige --input-wav (pas de mode live sans overlay
+# pour l'instant). Utilise par l'E2E scripte (tests/test_e2e.py).
+launch.cmd --input-wav tests\fixtures\test_fr.wav --no-overlay
+```
+
+Arret :
+- **Mode normal (overlay)** : fermer la fenetre de l'overlay, ou Ctrl+C dans
+  la console — les deux declenchent la meme sequence d'arret
+  (`Pipeline.shutdown()` : chaque etage `stop()` + `join(timeout=5s)`, fichier
+  transcript ferme). Ctrl+C sous Qt exige un idiome specifique (un `QTimer`
+  sans effet qui force periodiquement l'interpreteur a repasser en bytecode
+  Python, sinon le signal n'est jamais livre tant que la boucle d'evenements
+  Qt tourne) : voir le docstring de `main.py` et les sources citees
+  (machinekoder.com, mailing list PyQt de Riverbank).
+- **Mode `--input-wav --no-overlay`** : se termine seul des que le fichier est
+  entierement rejoue, traduit et journalise (aucune interaction requise).
+
+Raccourci pause/reprise dans l'overlay : `Ctrl+Alt+P` (voir Limites connues).
 
 ## Tests
 
@@ -81,8 +119,88 @@ si une cle est manquante ou invalide.
 .venv/Scripts/python.exe -m pytest
 ```
 
+139 tests (2026-07-18), tous verts, GPU inclus (`pytest -m gpu` pour les
+selectionner seuls). Necessitent une RTX 5080 ou equivalent + Ollama demarre
+avec `qwen3:4b-instruct` disponible pour les tests marques `@pytest.mark.gpu`
+(`tests/test_asr_integration.py`, `tests/test_e2e.py`) — skip documente
+(`OLLAMA_UNAVAILABLE_REASON`) si Ollama ne repond pas, sans faire echouer la
+suite.
+
+## Architecture
+
+```
+capture.py (WASAPI loopback+mic, 16 kHz mono)
+   │  AudioChunk
+   ▼
+audio_q ──▶ AsrSegmenterThread (main.py)
+                │  KyutaiStreamingAsr (asr.py) + Segmenter (segmenter.py)
+                │  TranscriptSegment (final uniquement, cf CONTRACT.md)
+                ▼
+            segment_q ──▶ TranslatorThread (translator.py, Ollama qwen3:4b-instruct)
+                                │  TranslatedSegment
+                                ▼
+                            ui_q ──▶ UiFanoutThread (main.py)
+                                        │  log transcript (TranscriptLogger)
+                                        ▼
+                                    overlay_ui_q ──▶ LiveOverlay (main.py, sur Overlay de overlay.py)
+```
+
+`main.py` assemble ce pipeline (tache 6) : chaque etage tourne sur son propre
+thread (sauf l'overlay, sur le thread principal — Qt l'exige), `--input-wav`
+remplace `capture.py` par `WavFeederThread` en amont de `audio_q`, le reste du
+pipeline est identique en mode live et en mode fichier. Le texte VO progressif
+(callback `on_partial` de `Segmenter`, jamais construit en `TranscriptSegment`
+per CONTRACT.md) transite par une queue interne dediee (`partial_q`), drainee
+par un second `QTimer` de `LiveOverlay` — jamais par `ui_q`.
+
 ## Limites connues
 
-*Sera complete en tache 6* (limites mesurees sur le pipeline complet :
-latence bout en bout, qualite de la synchronisation micro/loopback,
-comportement hors ligne d'Ollama, etc.)
+- **Anti-echo v1** : attenuation du micro basee sur le niveau (RMS du
+  loopback), pas d'annulation d'echo acoustique (AEC) reelle. Documente dans
+  `livecap/capture.py`. Suffisant pour reduire (pas eliminer) la
+  retranscription de l'audio des haut-parleurs capte par le micro.
+- **Raccourci pause non global** : `Ctrl+Alt+P` (overlay) utilise un
+  `QShortcut` avec `Qt.ShortcutContext.ApplicationShortcut` : il fonctionne
+  tant que LiveCap Local a le focus, mais PAS quand une autre application
+  (Teams) est au premier plan. Un vrai raccourci systeme demanderait
+  `RegisterHotKey`/`WM_HOTKEY` (documente peu fiable sur Qt 6.2-6.5, cf issue
+  Qt forum citee dans `livecap/overlay.py`) ou une dependance tierce
+  (keyboard/pynput/pywin32), hors perimetre v1 (aucune nouvelle dependance).
+- **FR/EN uniquement** : modele Kyutai `stt-1b-en_fr` bilingue, detection de
+  langue heuristique (stopwords + ratio de caracteres accentues, cf
+  `livecap/segmenter.py`) — pas de vraie identification de langue, adequat
+  pour ce perimetre uniquement.
+- **Resampling capture** : interpolation lineaire (`numpy.interp`), pas de
+  polyphase (scipy hors dependances) — legere alteration des hautes
+  frequences, sans impact mesure sur la qualite de transcription.
+- **Mode live headless** (`--no-overlay` sans `--input-wav`) volontairement
+  non supporte pour l'instant : `--no-overlay` exige `--input-wav` (message
+  d'erreur explicite dans `main.py`), la capture WASAPI sans affichage
+  n'ayant pas de cas d'usage identifie dans le PRD.
+- **Diarisation** : hors perimetre v1 (PRD), pas de distinction des locuteurs.
+
+## Resultats mesures (2026-07-18, RTX 5080, torch 2.11.0+cu128)
+
+- ASR streaming (`tests/test_asr_integration.py`) : 16-18 ms/step mesures au
+  POC, plafond de sanite teste a < 200 ms/step.
+- Traduction Ollama `qwen3:4b-instruct` : latence mediane < 500 ms (critere
+  PRD, `tests/test_translator.py::test_translate_text_live_ollama_latency`).
+- Latence bout en bout (1er segment final -> 1ere traduction, mode
+  `--input-wav`, `tests/test_e2e.py`) : mesuree systematiquement 140-1780 ms
+  selon l'etat de chauffe d'Ollama (premier appel = chargement modele en
+  VRAM), toujours trouvee tres en dessous du seuil PRD de 2,5 s.
+- Chargement modele Kyutai `stt-1b-en_fr` (cold start) : ~2,4-2,9 s. Bug
+  trouve et corrige pendant l'integration (tache 6) : un producteur audio
+  (capture ou `--input-wav`) demarrant avant la fin de ce chargement remplit
+  la queue bornee `audio_q` et perd des chunks — corrige par un
+  `threading.Event` (`AsrSegmenterThread.ready`) que `main.py` attend avant de
+  demarrer le producteur (`ASR_READY_TIMEOUT_S = 60 s`).
+- Verification reseau (methode : sondage `netstat -ano` toutes les 200 ms
+  pendant un run `--input-wav --no-overlay` complet, filtre sur le PID du
+  process `.venv` du pipeline) : 0/20 echantillons avec une connexion etablie
+  depuis le process LiveCap Local (loopback Ollama trop bref pour ce pas
+  d'echantillonnage, et surtout aucune connexion externe). Un process
+  compagnon utilisant le Python systeme (hors `.venv`) apparait pour
+  n'importe quel script Python sur cette machine (verifie avec un script sans
+  aucun import) et etablit une connexion HTTPS externe : infrastructure de
+  l'environnement de session, sans rapport avec le code de ce projet.
