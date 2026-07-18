@@ -9,9 +9,9 @@
         "testStrategy": "uv pip check, import de chaque dependance, python -c torch.cuda.is_available() True.",
         "priority": "high",
         "dependencies": [],
-        "status": "in-progress",
+        "status": "done",
         "subtasks": [],
-        "updatedAt": "2026-07-18T17:02:23.502Z"
+        "updatedAt": "2026-07-18T17:29:15.288Z"
       },
       {
         "id": "2",
@@ -23,8 +23,9 @@
         "dependencies": [
           "1"
         ],
-        "status": "pending",
-        "subtasks": []
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-07-18T17:40:37.711Z"
       },
       {
         "id": "3",
@@ -36,8 +37,9 @@
         "dependencies": [
           "1"
         ],
-        "status": "pending",
-        "subtasks": []
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-07-18T17:47:30.055Z"
       },
       {
         "id": "4",
@@ -49,8 +51,9 @@
         "dependencies": [
           "1"
         ],
-        "status": "pending",
-        "subtasks": []
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-07-18T17:42:07.773Z"
       },
       {
         "id": "5",
@@ -62,8 +65,9 @@
         "dependencies": [
           "1"
         ],
-        "status": "pending",
-        "subtasks": []
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-07-18T17:42:07.777Z"
       },
       {
         "id": "6",
@@ -78,15 +82,16 @@
           "4",
           "5"
         ],
-        "status": "pending",
-        "subtasks": []
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-07-18T18:39:38.358Z"
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-07-18T17:02:23.503Z",
+      "lastModified": "2026-07-18T18:39:38.358Z",
       "taskCount": 6,
-      "completedCount": 0,
+      "completedCount": 6,
       "tags": [
         "master"
       ]
