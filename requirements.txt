@@ -1,0 +1,13 @@
+# Torch n'est PAS liste ici : il s'installe separement depuis l'index cu128
+# (voir README.md - Installation), sinon uv/pip resout un build CPU.
+#   uv pip install --python .venv --index-url https://download.pytorch.org/whl/cu128 torch
+#
+# Versions validees au POC (C:\dev\Antigravity\tools\livecap-poc, 2026-07-18) :
+# torch==2.11.0+cu128, moshi==0.2.13
+moshi==0.2.13
+soundfile
+PyAudioWPatch
+PyQt6
+pyyaml
+pytest
+pytest-qt
