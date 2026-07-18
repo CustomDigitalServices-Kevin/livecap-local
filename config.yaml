@@ -1,0 +1,25 @@
+# Configuration par defaut de LiveCap Local. Voir CONTRACT.md pour le schema
+# complet et livecap/config.py pour la validation.
+
+# Langue cible de la traduction. L'autre langue (fr <-> en) est detectee
+# implicitement par le modele ASR bilingue Kyutai stt-1b-en_fr.
+target_lang: fr
+
+devices:
+  # "auto" selectionne le premier peripherique WASAPI loopback par defaut.
+  loopback: auto
+  # "auto" selectionne le micro par defaut. "none" desactive la capture micro
+  # (sous-titrage de l'audio systeme uniquement).
+  mic: auto
+
+overlay:
+  # top-left | top-center | top-right | bottom-left | bottom-center | bottom-right
+  position: bottom-center
+  font_size: 22
+  # Si true, l'overlay laisse passer les clics souris (WS_EX_TRANSPARENT).
+  click_through: false
+  # Nombre de segments precedents conserves a l'affichage sous la ligne active.
+  history: 3
+
+# Si true, ecrit le transcript horodate (VO + traduction) dans transcripts/.
+log_transcript: false
