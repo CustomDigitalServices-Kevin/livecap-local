@@ -1,0 +1,95 @@
+{
+  "master": {
+    "tasks": [
+      {
+        "id": "1",
+        "title": "Scaffold projet + contrat d'interfaces",
+        "description": "Structure du repo livecap-local : pyproject/requirements (uv), venv torch cu128 + moshi + PyQt6 + PyAudioWPatch, config.yaml (langues, devices, overlay), CONTRACT.md definissant les interfaces entre modules (queues, dataclasses TranscriptSegment/TranslatedSegment), .vscode exclusions watcher .venv, .gitignore, squelette README.",
+        "details": "Reprendre les versions validees au POC (torch 2.11.0+cu128, moshi 0.2.13). CONTRACT.md est le fichier de reference que les taches 2-5 importent : dataclasses, noms de modules, signatures. Exclusions .vscode obligatoires (tempete rg 2026-07-18).",
+        "testStrategy": "uv pip check, import de chaque dependance, python -c torch.cuda.is_available() True.",
+        "priority": "high",
+        "dependencies": [],
+        "status": "in-progress",
+        "subtasks": [],
+        "updatedAt": "2026-07-18T17:02:23.502Z"
+      },
+      {
+        "id": "2",
+        "title": "Capture audio WASAPI double flux",
+        "description": "Module capture.py : PyAudioWPatch loopback (audio systeme) + micro, resampling 16 kHz mono, mixage des 2 flux avec horodatage, ring buffer thread-safe pousse vers la queue ASR definie dans CONTRACT.md.",
+        "details": "Gerer l'absence de device (fallback loopback seul), latence de bloc <= 80 ms pour coller au pas Kyutai. Anti-echo simple : attenuer le flux micro quand loopback actif est acceptable en v1, documenter le choix.",
+        "testStrategy": "pytest avec flux synthetiques (mock PyAudioWPatch documente) : mixage, resampling, timestamps monotones. Test manuel liste des devices.",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "3",
+        "title": "ASR streaming Kyutai + segmentation",
+        "description": "Module asr.py : charge stt-1b-en_fr via moshi (NO_TORCH_COMPILE=1 pose par le code, pas par l'utilisateur), consomme la queue audio, emet les tokens texte en continu ; module segmenter.py : agrege les tokens en segments stables (ponctuation ou silence > 700 ms) et pousse TranscriptSegment vers la queue traduction.",
+        "details": "S'inspirer de moshi/run_inference.py (InferenceState) pour le streaming pas-a-pas plutot que le mode fichier. Modele charge une fois, warm. Mesurer ms/step en log DEBUG.",
+        "testStrategy": "pytest segmenter (regles ponctuation/silence, edge cases tokens vides). Test integration sur test_fr.wav/test_en.wav du POC : transcript conforme a celui du POC.",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "4",
+        "title": "Client traduction Ollama",
+        "description": "Module translator.py : reprend le pattern bench_translate.py du POC (qwen3:4b-instruct, prompt subtitle translator, temperature 0), consomme la queue segments, produit TranslatedSegment vers la queue UI. Detection Ollama absent/eteint avec message clair et demarrage auto si possible.",
+        "details": "File d'attente avec coalescence : si un segment plus recent arrive avant la fin de la traduction courante, traduire le plus recent en priorite. Timeout 5 s par segment, en cas d'echec afficher VO seule (jamais bloquer l'affichage).",
+        "testStrategy": "pytest avec serveur HTTP mock documente (reponses Ollama simulees) : nominal, timeout, coalescence. Test integration live si Ollama actif : latence mediane < 500 ms.",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "5",
+        "title": "Overlay PyQt6",
+        "description": "Module overlay.py : fenetre borderless WindowStaysOnTopHint, fond semi-transparent, ligne VO + ligne traduction, historique 3 segments, position/taille/police depuis config.yaml, raccourci global pause/reprise, option click-through (WS_EX_TRANSPARENT).",
+        "details": "Consomme la queue UI via QTimer (pas de thread Qt non-main). Doit rester fluide pendant que STT/traduction tournent (queues non bloquantes).",
+        "testStrategy": "pytest-qt : rendu des segments, mise a jour, config appliquee. Test manuel : overlay au-dessus de Teams plein ecran.",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "6",
+        "title": "Integration pipeline + launcher + E2E + doc",
+        "description": "main.py assemble capture -> asr -> segmenter -> translator -> overlay (threads + queues du CONTRACT.md), arret propre Ctrl+C, transcript logge en fichier horodate (option config), launch.cmd (active venv, NO_TORCH_COMPILE, demarre Ollama si absent, lance main.py), test E2E scripte (wav FR et EN -> transcript+traduction loggees), README complet, verification zero connexion sortante hors localhost.",
+        "details": "E2E reutilise test_fr.wav/test_en.wav du POC via un mode --input-wav qui court-circuite la capture. Mesurer latence bout en bout et l'ecrire dans le rapport final.",
+        "testStrategy": "Test E2E scripte PASS dans les 2 sens, latence mesuree < 2,5 s, pytest global vert, launch.cmd teste reellement.",
+        "priority": "high",
+        "dependencies": [
+          "2",
+          "3",
+          "4",
+          "5"
+        ],
+        "status": "pending",
+        "subtasks": []
+      }
+    ],
+    "metadata": {
+      "version": "1.0.0",
+      "lastModified": "2026-07-18T17:02:23.503Z",
+      "taskCount": 6,
+      "completedCount": 0,
+      "tags": [
+        "master"
+      ]
+    }
+  }
+}

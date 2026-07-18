@@ -1,0 +1,42 @@
+# PRD : LiveCap Local
+
+## Contexte
+
+Kevin (freelance Power Platform) veut remplacer Windows Live Captions par un outil 100% local de sous-titrage + traduction temps réel de ses réunions Teams. POC validé le 2026-07-18 sur RTX 5080 (STT 4,5x temps réel, traduction 160 ms/segment, VRAM 9,3/16 GB). Références : RAG Obsidian `Vault_Projets/LLM Compression Skills/live-captioning-translation-stack-2026.md`, mémoire `Mémoire_projets/LiveCap Local/`, POC `C:\dev\Antigravity\tools\livecap-poc`.
+
+## Objectif global
+
+Outil Windows lançable en une commande qui affiche en overlay les sous-titres transcrits et traduits (EN vers FR et FR vers EN) de l'audio système + micro, sans aucun appel réseau externe.
+
+## Périmètre fonctionnel
+
+- Capture simultanée audio système (WASAPI loopback, interlocuteurs Teams) et micro via PyAudioWPatch, resamplée 16 kHz mono pour l'ASR
+- Transcription streaming Kyutai stt-1b-en_fr via moshi PyTorch (NO_TORCH_COMPILE=1 obligatoire), détection de langue implicite (modèle bilingue)
+- Segmentation en phrases/segments envoyés au traducteur dès stabilisation (pause ou ponctuation)
+- Traduction par qwen3:4b-instruct via API Ollama localhost (pattern bench_translate.py du POC), sens FR->EN ou EN->FR configurable
+- Overlay PyQt6 borderless, always-on-top, cliquable-au-travers optionnel : ligne VO + ligne traduction, historique court
+- Configuration fichier (langue cible, périphériques audio, tailles police, position overlay) + launcher .cmd
+- Journalisation locale du transcript horodaté (option) pour compte rendu post-réunion
+
+## Hors périmètre
+
+- Diarisation (qui parle) : v2 éventuelle avec MOSS-Transcribe-Diarize en post-réunion
+- Toute autre paire de langues que FR/EN
+- Packaging installeur MSI/exe distribuable : usage personnel Kevin uniquement
+- Intégration Teams API ou capture vidéo
+
+## Contraintes techniques
+
+- 100% local, zéro appel réseau hors localhost (Ollama) et téléchargement initial modèles HF
+- Python 3.12, venv uv, torch 2.11+cu128 (sm_120), moshi 0.2.13, PyQt6, PyAudioWPatch
+- VRAM modèles ~6 GB ; budget système < 12 GB desktop inclus (mesuré 9,3/16 GB au POC 2026-07-18) ; latence bout en bout cible < 2,5 s
+- Gotchas connus à respecter : NO_TORCH_COMPILE=1 (Triton absent Windows), Ollama déjà installé (0.23.2), .vscode exclusions watcher sur .venv (tempête rg du 2026-07-18)
+- Règles Antigravity : TypeScript non concerné, PEP8, zéro TODO/stub/mock non documenté, tests pytest happy path + edge cases
+
+## Critères d'acceptation
+
+- `launch.cmd` démarre l'outil et l'overlay affiche les sous-titres d'un audio joué sur le PC en moins de 2,5 s de latence perçue
+- Test E2E scripté : lecture d'un wav FR connu -> transcript + traduction EN affichés et loggés, et inversement EN->FR
+- Aucune connexion sortante hors localhost pendant l'exécution (vérifiable)
+- pytest vert sur les modules capture (mock documenté), segmentation, client traduction, config
+- README avec installation, configuration, limites connues
