@@ -53,7 +53,16 @@ from livecap.contract import TranscriptSegment, TranslatedSegment
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_HOST = "http://localhost:11434"
+# 127.0.0.1 and NOT "localhost": Ollama "binds 127.0.0.1 port 11434 by
+# default" (https://docs.ollama.com/faq), i.e. IPv4 only, while Windows
+# resolves "localhost" to ::1 first (the hosts file ships its localhost
+# entries commented out, so resolution goes through the DNS client, which
+# returns AF_INET6 ahead of AF_INET). urllib then spends ~2.0 s on the
+# doomed ::1 connection before falling back to IPv4 -- measured 2038 ms of
+# connect() for "localhost" vs 14 ms for "127.0.0.1" on this machine, which
+# is paid on EVERY translation because urllib opens a fresh connection per
+# call. Keep the literal IPv4 address.
+OLLAMA_HOST = "http://127.0.0.1:11434"
 OLLAMA_CHAT_URL = f"{OLLAMA_HOST}/api/chat"
 OLLAMA_TAGS_URL = f"{OLLAMA_HOST}/api/tags"
 MODEL = "qwen3:4b-instruct"
