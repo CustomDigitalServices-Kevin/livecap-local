@@ -389,3 +389,26 @@ def test_translate_text_live_ollama_latency() -> None:
         assert result  # non-empty translation
     median_ms = sorted(latencies_ms)[len(latencies_ms) // 2]
     assert median_ms < 500, f"latence mediane {median_ms:.0f} ms >= 500 ms"
+
+
+def test_ollama_host_is_a_literal_ipv4_address() -> None:
+    """Regression guard for the 2026-07-20 latency bug.
+
+    Ollama binds 127.0.0.1 only (https://docs.ollama.com/faq). On Windows
+    "localhost" resolves to ::1 before 127.0.0.1, and urllib burns ~2.0 s on
+    that dead IPv6 attempt before falling back -- on EVERY call, since it
+    opens a fresh connection per request. Measured on the dev machine:
+    2038 ms connect() via "localhost" vs 14 ms via "127.0.0.1", which pushed
+    the median translation from 124 ms to 2226 ms and blew the 500 ms budget.
+    Any hostname that can resolve to IPv6 first must not come back here.
+    """
+    from urllib.parse import urlparse
+
+    from livecap.translator import OLLAMA_CHAT_URL, OLLAMA_HOST, OLLAMA_TAGS_URL
+
+    for url in (OLLAMA_HOST, OLLAMA_CHAT_URL, OLLAMA_TAGS_URL):
+        host = urlparse(url).hostname
+        assert host == "127.0.0.1", (
+            f"{url!r} doit viser 127.0.0.1 en litteral, pas {host!r} "
+            "(voir le commentaire de OLLAMA_HOST dans livecap/translator.py)"
+        )
