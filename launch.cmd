@@ -4,7 +4,10 @@ REM   1. Activates the project's .venv (uv-created, Python 3.12, torch cu128, mo
 REM   2. Sets NO_TORCH_COMPILE=1 (defense in depth: livecap/asr.py and main.py already
 REM      set it via os.environ.setdefault, but Triton's absence on Windows means this
 REM      must never depend on a single code path -- see CONTRACT.md gotchas).
-REM   3. Verifies Ollama answers on localhost:11434, starts it if not (best-effort:
+REM   3. Verifies Ollama answers on 127.0.0.1:11434 -- the literal IPv4, never
+REM      "localhost", which resolves to ::1 first on Windows and costs ~2 s per
+REM      call (see the OLLAMA_HOST comment in livecap/translator.py). Starts it
+REM      if absent (best-effort:
 REM      main.py's own livecap.translator.ensure_ollama_running() is the authoritative
 REM      check/retry and will still raise a clear error if this fails).
 REM   4. Launches main.py with any extra arguments passed through unchanged
@@ -20,8 +23,8 @@ if not exist ".venv\Scripts\python.exe" (
 
 set "NO_TORCH_COMPILE=1"
 
-echo [launch.cmd] Verification d'Ollama sur localhost:11434...
-curl -s -o NUL -w "%%{http_code}" http://localhost:11434/api/tags > "%TEMP%\livecap_ollama_status.txt" 2>NUL
+echo [launch.cmd] Verification d'Ollama sur 127.0.0.1:11434...
+curl -s -o NUL -w "%%{http_code}" http://127.0.0.1:11434/api/tags > "%TEMP%\livecap_ollama_status.txt" 2>NUL
 set /p OLLAMA_STATUS=<"%TEMP%\livecap_ollama_status.txt"
 del "%TEMP%\livecap_ollama_status.txt" >NUL 2>&1
 
