@@ -99,6 +99,29 @@ launch.cmd --input-wav tests\fixtures\test_fr.wav
 launch.cmd --input-wav tests\fixtures\test_fr.wav --no-overlay
 ```
 
+### Raccourci Bureau
+
+Un raccourci `LiveCap Local` pointe vers `launch.cmd` (icone
+`assets/livecap.ico`, fenetre console demarree reduite). Le recreer, ou le
+recreer apres un deplacement du projet :
+
+```powershell
+$ws = New-Object -ComObject WScript.Shell
+$s = $ws.CreateShortcut((Join-Path $ws.SpecialFolders('Desktop') 'LiveCap Local.lnk'))
+$s.TargetPath = 'C:\dev\Antigravity	ools\livecap-local\launch.cmd'
+$s.WorkingDirectory = 'C:\dev\Antigravity	ools\livecap-local'
+$s.IconLocation = 'C:\dev\Antigravity	ools\livecap-localssets\livecap.ico'
+$s.WindowStyle = 7   # 7 = reduit (https://learn.microsoft.com/en-us/previous-versions/windows/internet-explorer/ie-developer/windows-scripting/w88k7fw2(v=vs.84))
+$s.Save()
+```
+
+L'icone se regenere avec `.venv\Scripts\python.exe tools/make_icon.py`.
+
+Il n'y a pas d'executable autonome : l'application tourne dans son venv et
+`launch.cmd` en est le point d'entree. La console reduite reste ouverte
+pendant toute la session et la fermer arrete l'outil, exactement comme le
+bouton `X` de l'overlay.
+
 Arret :
 - **Mode normal (overlay)** : bouton `X` en haut a droite du panneau,
   raccourci `Ctrl+Alt+Q`, ou Ctrl+C dans la console — les deux declenchent la meme sequence d'arret
