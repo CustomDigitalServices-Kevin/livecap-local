@@ -5,3 +5,6 @@ __pycache__/
 transcripts/
 .pytest_cache/
 .ruff_cache/
+
+# Reglages utilisateur enregistres depuis le panneau de l overlay
+settings.local.yaml
