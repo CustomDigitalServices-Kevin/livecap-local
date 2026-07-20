@@ -39,10 +39,11 @@ README.md).
 from __future__ import annotations
 
 import logging
+import math
 import queue
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from PyQt6.QtCore import QPoint, QRect, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRect, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -76,6 +77,8 @@ HISTORY_ALPHA = 200
 CHROME_COLOR = QColor(255, 255, 255, 130)  # close button + resize grip strokes
 CHROME_HOVER_COLOR = QColor(255, 120, 120)
 CLOSE_BUTTON_PX = 18  # side of the square hit area, top-right of the panel
+GEAR_BUTTON_PX = 18  # side of the square hit area, left of the close button
+GEAR_TEETH = 8
 RESIZE_GRIP_PX = 18  # side of the square hit area, bottom-right of the panel
 MIN_WIDTH_PX = 240
 MIN_HEIGHT_PX = 60
@@ -137,6 +140,11 @@ class Overlay(QWidget):
     #: is requested explicitly rather than inferred from window bookkeeping.
     close_requested = pyqtSignal()
 
+    #: Emitted when the gear button is clicked. main.py owns the settings
+    #: panel, because applying a setting means reaching into the translator
+    #: thread -- something this widget must not know about.
+    settings_requested = pyqtSignal()
+
     def __init__(
         self,
         config: OverlayConfig,
@@ -167,6 +175,7 @@ class Overlay(QWidget):
         self._resize_origin: tuple[QPoint, int, int] | None = None
         self._manual_size: tuple[int, int] | None = None
         self._close_hovered = False
+        self._gear_hovered = False
         self.setMouseTracking(True)  # needed for close-button hover feedback
 
         flags = (
@@ -332,6 +341,20 @@ class Overlay(QWidget):
         self._relayout()
         self.update()
 
+    def set_font_size(self, font_size: int) -> None:
+        """Change the subtitle font size live (settings panel)."""
+        if font_size <= 0:
+            raise ValueError("font_size doit etre un entier > 0")
+        if font_size == self._font.pointSize():
+            return
+        self._font = QFont("Segoe UI", font_size, QFont.Weight.Bold)
+        # OUTLINE_WIDTH_RATIO is applied to config.font_size in paintEvent, so
+        # the config object has to follow or the outline would keep the old
+        # thickness. OverlayConfig is frozen, hence the replacement.
+        self._config = replace(self._config, font_size=font_size)
+        self._relayout()
+        self.update()
+
     def request_close(self) -> None:
         """Ask the host application to shut down, then hide the overlay."""
         logger.info("Fermeture demandee depuis l'overlay")
@@ -345,6 +368,16 @@ class Overlay(QWidget):
             MARGIN_PX // 3,
             CLOSE_BUTTON_PX,
             CLOSE_BUTTON_PX,
+        )
+
+    def gear_button_rect(self) -> QRect:
+        """Hit area of the settings gear, immediately left of the X."""
+        close_rect = self.close_button_rect()
+        return QRect(
+            close_rect.left() - GEAR_BUTTON_PX - MARGIN_PX // 4,
+            close_rect.top(),
+            GEAR_BUTTON_PX,
+            GEAR_BUTTON_PX,
         )
 
     def resize_grip_rect(self) -> QRect:
@@ -362,6 +395,10 @@ class Overlay(QWidget):
         pos = event.position().toPoint()
         if self.close_button_rect().contains(pos):
             self.request_close()
+            event.accept()
+            return
+        if self.gear_button_rect().contains(pos):
+            self.settings_requested.emit()
             event.accept()
             return
         if self.resize_grip_rect().contains(pos):
@@ -402,12 +439,14 @@ class Overlay(QWidget):
             return
         # Idle hover: highlight the X and show the resize cursor on the grip.
         hovered = self.close_button_rect().contains(pos)
-        if hovered != self._close_hovered:
+        gear_hovered = self.gear_button_rect().contains(pos)
+        if hovered != self._close_hovered or gear_hovered != self._gear_hovered:
             self._close_hovered = hovered
+            self._gear_hovered = gear_hovered
             self.update()
         if self.resize_grip_rect().contains(pos):
             self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-        elif hovered:
+        elif hovered or gear_hovered:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
         else:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
@@ -429,8 +468,9 @@ class Overlay(QWidget):
         event.accept()
 
     def leaveEvent(self, event) -> None:  # noqa: ANN001 (Qt override signature)
-        if self._close_hovered:
+        if self._close_hovered or self._gear_hovered:
             self._close_hovered = False
+            self._gear_hovered = False
             self.update()
         self.unsetCursor()
 
@@ -503,6 +543,24 @@ class Overlay(QWidget):
             close_rect.left() + inset,
             close_rect.bottom() - inset,
         )
+
+        gear_rect = self.gear_button_rect()
+        gear_pen = QPen(CHROME_HOVER_COLOR if self._gear_hovered else CHROME_COLOR)
+        gear_pen.setWidth(2)
+        painter.setPen(gear_pen)
+        center = QPointF(gear_rect.center()) + QPointF(0.5, 0.5)
+        outer_r = gear_rect.width() / 2.0 - 1.0
+        inner_r = outer_r * 0.55
+        # Teeth as radial spokes plus a hub circle: at 18 px a literal gear
+        # outline turns to mush, spokes stay legible.
+        for tooth in range(GEAR_TEETH):
+            angle = math.pi * 2 * tooth / GEAR_TEETH
+            dx, dy = math.cos(angle), math.sin(angle)
+            painter.drawLine(
+                QPointF(center.x() + dx * inner_r, center.y() + dy * inner_r),
+                QPointF(center.x() + dx * outer_r, center.y() + dy * outer_r),
+            )
+        painter.drawEllipse(center, inner_r * 0.85, inner_r * 0.85)
 
         grip_rect = self.resize_grip_rect()
         grip_pen = QPen(CHROME_COLOR)
