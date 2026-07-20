@@ -21,6 +21,7 @@ import pytest
 
 from livecap.contract import TranscriptSegment, make_segment_queue, make_ui_queue
 from livecap.translator import (
+    MAX_CONTEXT_TURNS,
     OllamaUnavailableError,
     TranslatorThread,
     check_ollama_health,
@@ -412,3 +413,154 @@ def test_ollama_host_is_a_literal_ipv4_address() -> None:
             f"{url!r} doit viser 127.0.0.1 en litteral, pas {host!r} "
             "(voir le commentaire de OLLAMA_HOST dans livecap/translator.py)"
         )
+
+
+# --- contexte de dialogue et reglages a chaud (panneau roue dentee) --------
+
+
+def test_translate_text_sends_think_false(ollama_mock: _MockOllamaServer) -> None:
+    """think=False protege les modeles thinking (14B) d'un content vide."""
+    translate_text(
+        "Hello", "fr", chat_url=f"http://127.0.0.1:{ollama_mock.server_port}/api/chat"
+    )
+    assert ollama_mock.received_chat_requests[-1]["think"] is False
+
+
+def test_translate_text_replays_history_as_dialogue_turns(
+    ollama_mock: _MockOllamaServer,
+) -> None:
+    """L'historique part en vrais tours user/assistant, dans l'ordre."""
+    translate_text(
+        "Can you check the flows again?",
+        "fr",
+        chat_url=f"http://127.0.0.1:{ollama_mock.server_port}/api/chat",
+        history=[
+            ("Let's review the flows.", "Passons en revue les flux."),
+            ("Three of them fail.", "Trois d'entre eux echouent."),
+        ],
+    )
+    messages = ollama_mock.received_chat_requests[-1]["messages"]
+    roles = [m["role"] for m in messages]
+    assert roles == ["system", "user", "assistant", "user", "assistant", "user"]
+    assert messages[1]["content"] == "Let's review the flows."
+    assert messages[2]["content"] == "Passons en revue les flux."
+    # Le segment a traduire reste le DERNIER message.
+    assert messages[-1]["content"] == "Can you check the flows again?"
+
+
+def test_translate_text_without_history_keeps_two_messages(
+    ollama_mock: _MockOllamaServer,
+) -> None:
+    translate_text(
+        "Hello", "fr", chat_url=f"http://127.0.0.1:{ollama_mock.server_port}/api/chat"
+    )
+    messages = ollama_mock.received_chat_requests[-1]["messages"]
+    assert [m["role"] for m in messages] == ["system", "user"]
+
+
+def test_thread_setters_are_reflected(ollama_mock: _MockOllamaServer) -> None:
+    thread = TranslatorThread(
+        make_segment_queue(),
+        make_ui_queue(),
+        target_lang="fr",
+        chat_url=f"http://127.0.0.1:{ollama_mock.server_port}/api/chat",
+    )
+    thread.set_model("qwen3:14b-q4_K_M")
+    thread.set_context_turns(3)
+    thread.set_target_lang("en")
+
+    assert thread.model == "qwen3:14b-q4_K_M"
+    assert thread.context_turns == 3
+    assert thread.target_lang == "en"
+
+
+def test_thread_context_turns_is_clamped(ollama_mock: _MockOllamaServer) -> None:
+    thread = TranslatorThread(
+        make_segment_queue(),
+        make_ui_queue(),
+        target_lang="fr",
+        chat_url=f"http://127.0.0.1:{ollama_mock.server_port}/api/chat",
+    )
+    thread.set_context_turns(-5)
+    assert thread.context_turns == 0
+    thread.set_context_turns(999)
+    assert thread.context_turns == MAX_CONTEXT_TURNS
+
+
+def test_thread_rejects_invalid_target_lang(ollama_mock: _MockOllamaServer) -> None:
+    thread = TranslatorThread(
+        make_segment_queue(),
+        make_ui_queue(),
+        target_lang="fr",
+        chat_url=f"http://127.0.0.1:{ollama_mock.server_port}/api/chat",
+    )
+    with pytest.raises(ValueError):
+        thread.set_target_lang("de")
+
+
+def test_thread_feeds_history_into_next_translation(
+    ollama_mock: _MockOllamaServer,
+) -> None:
+    """Avec context_turns>0, la traduction precedente est rejouee ensuite."""
+    ollama_mock.chat_response_fn = staticmethod(lambda body: "traduction mock")
+    segment_q = make_segment_queue()
+    ui_q = make_ui_queue()
+    thread = TranslatorThread(
+        segment_q,
+        ui_q,
+        target_lang="fr",
+        chat_url=f"http://127.0.0.1:{ollama_mock.server_port}/api/chat",
+        context_turns=2,
+    )
+
+    first = TranscriptSegment(
+        text="First sentence.", lang="en", t_start=0.0, t_end=1.0, final=True
+    )
+    second = TranscriptSegment(
+        text="Second sentence.", lang="en", t_start=1.0, t_end=2.0, final=True
+    )
+    thread._translate_and_publish(first)
+    thread._translate_and_publish(second)
+
+    messages = ollama_mock.received_chat_requests[-1]["messages"]
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+    assert messages[1]["content"] == "First sentence."
+    assert messages[2]["content"] == "traduction mock"
+    assert messages[-1]["content"] == "Second sentence."
+
+
+def test_thread_context_zero_sends_no_history(ollama_mock: _MockOllamaServer) -> None:
+    segment_q = make_segment_queue()
+    thread = TranslatorThread(
+        segment_q,
+        make_ui_queue(),
+        target_lang="fr",
+        chat_url=f"http://127.0.0.1:{ollama_mock.server_port}/api/chat",
+        context_turns=0,
+    )
+    for text in ("First sentence.", "Second sentence."):
+        thread._translate_and_publish(
+            TranscriptSegment(text=text, lang="en", t_start=0.0, t_end=1.0, final=True)
+        )
+    messages = ollama_mock.received_chat_requests[-1]["messages"]
+    assert [m["role"] for m in messages] == ["system", "user"]
+
+
+def test_changing_target_lang_clears_history(ollama_mock: _MockOllamaServer) -> None:
+    """L'historique est en langue cible: le garder ferait repondre en FR apres bascule EN."""
+    thread = TranslatorThread(
+        make_segment_queue(),
+        make_ui_queue(),
+        target_lang="fr",
+        chat_url=f"http://127.0.0.1:{ollama_mock.server_port}/api/chat",
+        context_turns=2,
+    )
+    thread._translate_and_publish(
+        TranscriptSegment(
+            text="Hello there.", lang="en", t_start=0.0, t_end=1.0, final=True
+        )
+    )
+    assert thread._history
+
+    thread.set_target_lang("en")
+    assert thread._history == []
