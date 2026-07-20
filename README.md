@@ -3,7 +3,7 @@
 Sous-titrage et traduction temps reel (FR <-> EN) des reunions Teams, 100%
 local. Remplace Windows Live Captions par un pipeline maison : capture audio
 systeme + micro -> transcription Kyutai `stt-1b-en_fr` (moshi) -> traduction
-`qwen3:4b-instruct` via Ollama localhost -> overlay PyQt6.
+`qwen3:4b-instruct` via Ollama sur 127.0.0.1:11434 -> overlay PyQt6.
 
 Voir `CONTRACT.md` pour les interfaces entre modules, et le PRD
 (`.taskmaster/docs/prd.txt`) pour le perimetre complet.
@@ -77,7 +77,7 @@ launch.cmd
 ```
 
 `launch.cmd` : pose `NO_TORCH_COMPILE=1` (defense en profondeur, deja pose par
-`livecap/asr.py` et `main.py`), verifie qu'Ollama repond sur `localhost:11434`
+`livecap/asr.py` et `main.py`), verifie qu'Ollama repond sur `127.0.0.1:11434`
 (le demarre en arriere-plan sinon, best-effort — `main.py` refait de toute
 facon la verification/relance autoritative via
 `livecap.translator.ensure_ollama_running`), puis lance
@@ -100,8 +100,8 @@ launch.cmd --input-wav tests\fixtures\test_fr.wav --no-overlay
 ```
 
 Arret :
-- **Mode normal (overlay)** : fermer la fenetre de l'overlay, ou Ctrl+C dans
-  la console — les deux declenchent la meme sequence d'arret
+- **Mode normal (overlay)** : bouton `X` en haut a droite du panneau,
+  raccourci `Ctrl+Alt+Q`, ou Ctrl+C dans la console — les deux declenchent la meme sequence d'arret
   (`Pipeline.shutdown()` : chaque etage `stop()` + `join(timeout=5s)`, fichier
   transcript ferme). Ctrl+C sous Qt exige un idiome specifique (un `QTimer`
   sans effet qui force periodiquement l'interpreteur a repasser en bytecode
@@ -111,7 +111,29 @@ Arret :
 - **Mode `--input-wav --no-overlay`** : se termine seul des que le fichier est
   entierement rejoue, traduit et journalise (aucune interaction requise).
 
-Raccourci pause/reprise dans l'overlay : `Ctrl+Alt+P` (voir Limites connues).
+### Controles de l'overlay
+
+| Action | Geste / raccourci |
+|--------|-------------------|
+| Deplacer le panneau | clic gauche + glisser (hors bouton `X` et poignee) |
+| Redimensionner | glisser la poignee en bas a droite (min 240 x 60 px) |
+| Faire defiler l'historique | molette ; revenir en bas rearme le suivi du direct |
+| Reinitialiser position et taille | `Ctrl+Alt+R` |
+| Pause / reprise | `Ctrl+Alt+P` (voir Limites connues) |
+| Fermer (arrete tout le pipeline) | bouton `X`, ou `Ctrl+Alt+Q` |
+
+Le panneau grandit avec la transcription jusqu'a 45% de la hauteur d'ecran,
+puis cesse de grandir et devient une zone defilante : `overlay.history` borne
+la profondeur remontable (400 segments par defaut).
+
+Ces trois interactions souris (deplacer, redimensionner, faire defiler)
+exigent `overlay.click_through: false`. Avec `click_through: true` la fenetre
+laisse passer les clics et ne recoit plus aucun evenement souris : seuls les
+raccourcis clavier restent disponibles.
+
+L'overlay est une fenetre `Qt.Tool` sans cadre : par construction elle
+n'apparait pas dans la barre des taches Windows, d'ou le bouton `X` et le
+raccourci `Ctrl+Alt+Q` comme seuls moyens de fermeture a la souris/clavier.
 
 ## Tests
 
