@@ -48,6 +48,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from typing import Sequence
 
 from livecap.contract import TranscriptSegment, TranslatedSegment
 
@@ -66,6 +67,35 @@ OLLAMA_HOST = "http://127.0.0.1:11434"
 OLLAMA_CHAT_URL = f"{OLLAMA_HOST}/api/chat"
 OLLAMA_TAGS_URL = f"{OLLAMA_HOST}/api/tags"
 MODEL = "qwen3:4b-instruct"
+
+#: Models offered in the overlay's settings panel, fastest first.
+#:
+#: Measured on the dev machine (RTX 5080, 16.3 GB) on 2026-07-20, median
+#: over 5 segments:
+#:   qwen3:4b-instruct   126 ms, fully on GPU even with Kyutai loaded
+#:   qwen3:14b-q4_K_M    199 ms alone, but 351 ms once Kyutai holds its
+#:                       ~3 GB: Ollama reports 11%/89% CPU/GPU and VRAM sits
+#:                       at 15.3/16.3 GB. Still inside the 500 ms budget,
+#:                       with no headroom left for another GPU consumer.
+#: The 14B is the better translator (it resolves pronouns the 4B garbles)
+#: but that VRAM pressure is why it is NOT the default.
+MODEL_CHOICES = (
+    (
+        "qwen3:4b-instruct",
+        "4B rapide",
+        "~126 ms, tient en VRAM avec l'ASR. Defaut.",
+    ),
+    (
+        "qwen3:14b-q4_K_M",
+        "14B precis",
+        "~351 ms avec l'ASR charge, VRAM a 94%. Meilleurs pronoms.",
+    ),
+)
+
+#: Upper bound for the settings panel, and the cap TranslatorThread keeps in
+#: memory. Three previous sentences is what the context-aware MT literature
+#: reports as the useful range (https://arxiv.org/pdf/1905.05979).
+MAX_CONTEXT_TURNS = 5
 
 TRANSLATE_TIMEOUT_S = 5.0
 HEALTH_CHECK_TIMEOUT_S = 2.0
@@ -150,29 +180,54 @@ def translate_text(
     chat_url: str = OLLAMA_CHAT_URL,
     model: str = MODEL,
     timeout: float = TRANSLATE_TIMEOUT_S,
+    history: "Sequence[tuple[str, str]]" = (),
 ) -> str:
     """Call Ollama /api/chat once and return the translated text.
 
-    Mirrors livecap-poc/bench_translate.py exactly: temperature 0,
-    num_predict 128, "subtitle translator" system prompt, stream=False.
+    temperature 0, num_predict 128, "subtitle translator" system prompt,
+    stream=False -- the settings validated in livecap-poc/bench_translate.py.
+
+    `history` carries the already-translated previous turns as
+    (source_text, translation) pairs. They are replayed as real user/assistant
+    messages, the "dialogue history" format: measured on 2026-07-20 it is what
+    lets the model resolve polysemy ("board summary" -> "resume du conseil"
+    instead of "du tableau") and it keeps terminology consistent with what is
+    already on screen. Cost is negligible (40 -> ~110 prompt tokens, +1 to
+    +10 ms) because generation, not prompt eval, is the bottleneck.
+
+    IMPORTANT: the translations passed in `history` must keep their accents.
+    Feeding unaccented French back to the model makes it mimic that style and
+    answer "Veuillez preparer le resume" (observed 2026-07-20).
+
     Raises urllib.error.URLError/TimeoutError/OSError on network failure,
     json.JSONDecodeError/KeyError on a malformed response body -- callers
     (TranslatorThread) are responsible for the VO-only fallback.
     """
     target_name = _TARGET_LANG_NAMES[target_lang]
+    messages: list[dict[str, str]] = [
+        {
+            "role": "system",
+            "content": (
+                f"You are a subtitle translator. Translate the user message "
+                f"to {target_name}. Output ONLY the translation, nothing else."
+            ),
+        }
+    ]
+    for source_text, translation in history:
+        messages.append({"role": "user", "content": source_text})
+        messages.append({"role": "assistant", "content": translation})
+    messages.append({"role": "user", "content": text})
+
     payload = {
         "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    f"You are a subtitle translator. Translate the user message "
-                    f"to {target_name}. Output ONLY the translation, nothing else."
-                ),
-            },
-            {"role": "user", "content": text},
-        ],
+        "messages": messages,
         "stream": False,
+        # Sent unconditionally: qwen3:14b-q4_K_M is a thinking model and would
+        # otherwise spend all 128 allowed tokens in message.thinking, returning
+        # an EMPTY message.content with done_reason "length"
+        # (https://docs.ollama.com/capabilities/thinking). Verified harmless on
+        # the non-thinking qwen3:4b-instruct, so switching models stays safe.
+        "think": False,
         "options": {"temperature": 0, "num_predict": 128},
     }
     req = urllib.request.Request(
@@ -204,6 +259,7 @@ class TranslatorThread(threading.Thread):
         model: str = MODEL,
         translate_timeout: float = TRANSLATE_TIMEOUT_S,
         poll_timeout: float = DEFAULT_POLL_TIMEOUT_S,
+        context_turns: int = 0,
     ) -> None:
         if target_lang not in _TARGET_LANG_NAMES:
             raise ValueError(
@@ -212,16 +268,77 @@ class TranslatorThread(threading.Thread):
         super().__init__(name="TranslatorThread", daemon=True)
         self._segment_q = segment_q
         self._ui_q = ui_q
-        self._target_lang = target_lang
         self._chat_url = chat_url
         self._tags_url = tags_url
-        self._model = model
         self._translate_timeout = translate_timeout
         self._poll_timeout = poll_timeout
         self._stop_event = threading.Event()
 
+        # Live-tunable settings (overlay settings panel writes them from the
+        # Qt thread while run() reads them here). Guarded by _settings_lock:
+        # each of these is read once per segment into a local, so a change
+        # mid-translation takes effect on the NEXT segment rather than
+        # tearing a call in half.
+        self._settings_lock = threading.Lock()
+        self._target_lang = target_lang
+        self._model = model
+        self._context_turns = max(0, min(context_turns, MAX_CONTEXT_TURNS))
+        # (source_text, translation) of the last successfully translated
+        # segments, oldest first. Only read/written from the worker thread.
+        self._history: list[tuple[str, str]] = []
+
     def stop(self) -> None:
         self._stop_event.set()
+
+    # --- live settings (safe to call from the Qt thread) -------------------
+
+    @property
+    def target_lang(self) -> str:
+        with self._settings_lock:
+            return self._target_lang
+
+    def set_target_lang(self, target_lang: str) -> None:
+        if target_lang not in _TARGET_LANG_NAMES:
+            raise ValueError(
+                f"target_lang={target_lang!r} invalide, attendu 'fr' ou 'en'"
+            )
+        with self._settings_lock:
+            if target_lang == self._target_lang:
+                return
+            self._target_lang = target_lang
+        # The history holds translations into the OLD language; replaying them
+        # would ask the model to keep answering in it.
+        self.clear_context()
+        logger.info("Langue cible -> %s", target_lang)
+
+    @property
+    def model(self) -> str:
+        with self._settings_lock:
+            return self._model
+
+    def set_model(self, model: str) -> None:
+        if not model:
+            raise ValueError("model ne peut pas etre vide")
+        with self._settings_lock:
+            if model == self._model:
+                return
+            self._model = model
+        logger.info("Modele de traduction -> %s", model)
+
+    @property
+    def context_turns(self) -> int:
+        with self._settings_lock:
+            return self._context_turns
+
+    def set_context_turns(self, turns: int) -> None:
+        clamped = max(0, min(int(turns), MAX_CONTEXT_TURNS))
+        with self._settings_lock:
+            self._context_turns = clamped
+        logger.info("Tours de contexte -> %d", clamped)
+
+    def clear_context(self) -> None:
+        """Drop the accumulated dialogue history (new topic, language switch)."""
+        self._history.clear()
 
     def run(self) -> None:
         ensure_ollama_running(tags_url=self._tags_url)
@@ -253,19 +370,28 @@ class TranslatorThread(threading.Thread):
         return latest
 
     def _translate_and_publish(self, segment: TranscriptSegment) -> None:
-        if segment.lang == self._target_lang:
+        # Snapshot the live settings once, so one segment is translated with
+        # one coherent configuration even if the panel changes mid-call.
+        with self._settings_lock:
+            target_lang = self._target_lang
+            model = self._model
+            context_turns = self._context_turns
+
+        if segment.lang == target_lang:
             # Already in the target language: nothing to translate, and this
             # is not a failure, so no warning -- just VO-only publication.
             self._publish(segment, text="", latency_ms=0.0)
             return
+        history = tuple(self._history[-context_turns:]) if context_turns else ()
         t0 = time.perf_counter()
         try:
             translation = translate_text(
                 segment.text,
-                self._target_lang,
+                target_lang,
                 chat_url=self._chat_url,
-                model=self._model,
+                model=model,
                 timeout=self._translate_timeout,
+                history=history,
             )
         except (
             urllib.error.URLError,
@@ -282,6 +408,13 @@ class TranslatorThread(threading.Thread):
             self._publish(segment, text="", latency_ms=0.0)
             return
         latency_ms = (time.perf_counter() - t0) * 1000
+        if translation:
+            self._history.append((segment.text, translation))
+            # Keep the cap, never the requested window: context_turns can be
+            # raised from the panel mid-meeting and should find earlier turns
+            # already available.
+            if len(self._history) > MAX_CONTEXT_TURNS:
+                del self._history[:-MAX_CONTEXT_TURNS]
         self._publish(segment, text=translation, latency_ms=latency_ms)
 
     def _publish(
