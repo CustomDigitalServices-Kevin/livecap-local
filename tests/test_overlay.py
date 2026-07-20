@@ -8,11 +8,11 @@ import queue
 
 import pytest
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QKeySequence
+from PyQt6.QtGui import QFont, QFontMetrics, QKeySequence
 
 from livecap.config import OverlayConfig
 from livecap.contract import TranscriptSegment, TranslatedSegment, make_ui_queue
-from livecap.overlay import Overlay, compute_geometry
+from livecap.overlay import Overlay, compute_geometry, wrap_text
 
 SCREEN_W = 1920
 SCREEN_H = 1080
@@ -495,4 +495,116 @@ def test_set_font_size_relayouts_taller_lines(qtbot: object) -> None:
     overlay.set_font_size(40)
 
     assert overlay.height() > small_height
+    overlay.shutdown()
+
+
+# --- retour a la ligne -----------------------------------------------------
+
+
+def _metrics(font_size: int = 20) -> QFontMetrics:
+    return QFontMetrics(QFont("Segoe UI", font_size, QFont.Weight.Bold))
+
+
+def test_wrap_text_keeps_short_line_intact() -> None:
+    metrics = _metrics()
+    text = "Bonjour"
+    assert wrap_text(text, metrics, metrics.horizontalAdvance(text) + 10) == [text]
+
+
+def test_wrap_text_empty_string_is_one_row() -> None:
+    assert wrap_text("", _metrics(), 500) == [""]
+
+
+def test_wrap_text_splits_on_spaces_and_loses_nothing() -> None:
+    metrics = _metrics()
+    text = "Pouvez-vous confirmer le calendrier de migration avant la fin du mois"
+    lines = wrap_text(text, metrics, metrics.horizontalAdvance("Pouvez-vous confirmer"))
+
+    assert len(lines) > 1
+    # Aucun mot ne doit disparaitre au passage.
+    assert " ".join(lines).split() == text.split()
+
+
+def test_wrap_text_every_line_fits_the_width() -> None:
+    metrics = _metrics()
+    max_width = metrics.horizontalAdvance("abcdefghij")
+    text = "Can you confirm the data migration schedule before the end of the month"
+
+    for line in wrap_text(text, metrics, max_width):
+        assert metrics.horizontalAdvance(line) <= max_width
+
+
+def test_wrap_text_breaks_a_word_longer_than_the_width() -> None:
+    """Un mot indivisible ne doit ni deborder ni boucler a l'infini."""
+    metrics = _metrics()
+    word = "Donaudampfschiffahrtselektrizitaetenhauptbetriebswerk"
+    max_width = metrics.horizontalAdvance("abcde")
+
+    lines = wrap_text(word, metrics, max_width)
+
+    assert len(lines) > 1
+    assert "".join(lines) == word
+    for line in lines:
+        assert metrics.horizontalAdvance(line) <= max_width
+
+
+def test_wrap_text_survives_absurdly_narrow_width() -> None:
+    lines = wrap_text("abc def", _metrics(), 1)
+    assert lines  # ne boucle pas, ne leve pas
+    assert "".join(lines).replace(" ", "") == "abcdef"
+
+
+def test_narrow_overlay_wraps_instead_of_truncating(qtbot: object) -> None:
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(font_size=20), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+    ui_q.put(
+        _translated(
+            "Can you confirm the data migration schedule before the end of the month?",
+            "Pouvez-vous confirmer le calendrier de migration avant la fin du mois ?",
+        )
+    )
+    overlay._poll_ui_queue()
+
+    overlay._manual_size = (300, 400)
+    overlay._relayout()
+
+    # 2 lignes logiques (VO + traduction) deviennent plusieurs lignes visuelles.
+    assert len(overlay._render_lines) == 2
+    assert len(overlay._wrapped_lines) > 2
+    # Et plus aucune ellipse: le texte est enroule, pas tronque.
+    assert not any("…" in line.text for line in overlay._wrapped_lines)
+    overlay.shutdown()
+
+
+def test_widening_the_overlay_reflows_back(qtbot: object) -> None:
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(font_size=20), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+    ui_q.put(_translated("A fairly long English sentence here.", "Une phrase assez longue."))
+    overlay._poll_ui_queue()
+
+    overlay._manual_size = (280, 400)
+    overlay._relayout()
+    narrow_rows = len(overlay._wrapped_lines)
+
+    overlay._manual_size = (1200, 400)
+    overlay._relayout()
+
+    assert len(overlay._wrapped_lines) < narrow_rows
+    overlay.shutdown()
+
+
+def test_scroll_counts_wrapped_rows_not_logical_lines(qtbot: object) -> None:
+    """Le scroll doit porter sur les lignes affichees, sinon la fin est inatteignable."""
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(font_size=20, history=400), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+    _fill(overlay, ui_q, 40)
+
+    overlay._manual_size = (300, 200)
+    overlay._relayout()
+
+    assert len(overlay._wrapped_lines) > len(overlay._render_lines)
+    assert overlay._scroll_offset == len(overlay._wrapped_lines) - overlay._visible_lines
     overlay.shutdown()
