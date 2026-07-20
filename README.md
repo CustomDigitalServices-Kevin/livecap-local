@@ -99,6 +99,33 @@ launch.cmd --input-wav tests\fixtures\test_fr.wav
 launch.cmd --input-wav tests\fixtures\test_fr.wav --no-overlay
 ```
 
+### Panneau de reglages (roue dentee)
+
+La roue dentee, a gauche de la croix, ouvre un panneau modifiable en cours
+de reunion. Chaque changement s'applique immediatement et est enregistre
+dans `settings.local.yaml`, fusionne par-dessus `config.yaml` au demarrage
+suivant. Supprimer ce fichier remet les valeurs de `config.yaml`.
+
+| Reglage | Effet |
+|---------|-------|
+| Modele | `qwen3:4b-instruct` (~126 ms) ou `qwen3:14b-q4_K_M` (~351 ms avec l'ASR charge) |
+| Contexte | 0 a 5 phrases precedentes envoyees au modele |
+| Traduire vers | francais ou anglais |
+| Taille du texte | 10 a 72 px |
+
+**Choix du modele.** Mesure du 2026-07-20 sur RTX 5080 (16,3 Go) : le 14B
+traduit mieux les pronoms ("le lui transmettre" la ou le 4B produit du
+flou), mais une fois le checkpoint Kyutai charge il ne tient plus
+entierement en VRAM. Ollama rapporte alors 11%/89% CPU/GPU et la VRAM
+atteint 15,3/16,3 Go. La latence reste sous le budget de 500 ms mais il n'y
+a plus de marge pour un autre consommateur GPU. Le 4B reste le defaut.
+
+**Contexte.** Les phrases precedentes sont rejouees comme de vrais tours de
+dialogue. Mesure sur 5 cas : cela corrige la polysemie ("board summary" ->
+"resume du conseil" au lieu de "du tableau") sur les deux modeles, et ne
+change rien au reste. Ce n'est donc pas un gain general. Cout : environ
++70 tokens de prompt pour +1 a +10 ms.
+
 ### Raccourci Bureau
 
 Un raccourci `LiveCap Local` pointe vers `launch.cmd` (icone
