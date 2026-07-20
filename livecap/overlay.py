@@ -16,10 +16,10 @@ corner -- only the anchor point itself (computed by compute_geometry) is
 kept fixed as the block grows/shrinks with new segments. Each segment
 becomes 1 line (VO only, when translation is "" -- failed/timed-out/
 same-language, per CONTRACT.md) or 2 lines (VO + translation). Lines wider
-than the overlay are elided with "..." rather than wrapped: segmenter.py
-stabilizes on punctuation/silence so segments are expected to be
-sentence-sized, and full word-wrap is judged out of scope for a subtitle
-overlay (documented trade-off, not a hidden gap).
+than the overlay are WRAPPED at word boundaries (see wrap_text), so one
+segment may occupy several visual rows. Earlier versions elided them with
+"..." instead, which was tenable only while the panel sized itself to its
+content; once it became resizable, narrowing it silently hid speech.
 
 Pause/resume: a QShortcut (default Ctrl+Alt+P) toggles a local pause flag
 that stops draining ui_q. Its context is Qt.ShortcutContext.ApplicationShortcut
@@ -127,6 +127,45 @@ class _RenderLine:
     color: QColor
 
 
+def wrap_text(text: str, metrics: QFontMetrics, max_width: int) -> list[str]:
+    """Split `text` into visual lines that each fit within `max_width` px.
+
+    Breaks on spaces; a single word wider than max_width is broken between
+    characters rather than left to overflow (long URLs, agglutinated words).
+    Returns [""] for empty input so an empty line still occupies one row.
+
+    Wrapping rather than eliding: the overlay used to elide with "..." on the
+    assumption its width always matched its content, which stopped being true
+    once the panel became resizable -- narrowing it silently hid speech.
+    """
+    if not text:
+        return [""]
+    if metrics.horizontalAdvance(text) <= max_width:
+        return [text]
+
+    lines: list[str] = []
+    current = ""
+    for word in text.split(" "):
+        candidate = f"{current} {word}" if current else word
+        if metrics.horizontalAdvance(candidate) <= max_width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+            current = ""
+        # The word alone may still overflow: break it by characters.
+        while metrics.horizontalAdvance(word) > max_width:
+            cut = len(word)
+            while cut > 1 and metrics.horizontalAdvance(word[:cut]) > max_width:
+                cut -= 1
+            lines.append(word[:cut])
+            word = word[cut:]
+        current = word
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
 class Overlay(QWidget):
     """Borderless always-on-top subtitle overlay. See module docstring."""
 
@@ -159,6 +198,9 @@ class Overlay(QWidget):
         self._current: TranslatedSegment | None = None
         self._history: list[TranslatedSegment] = []
         self._render_lines: list[_RenderLine] = []
+        # Same lines after word-wrapping to the current width; this is what is
+        # scrolled and painted (see _relayout).
+        self._wrapped_lines: list[_RenderLine] = []
         self._paused = False
         # Scroll state: _scroll_offset is the index of the first VISIBLE render
         # line. _stick_to_bottom keeps the newest segment in view until the user
@@ -298,9 +340,20 @@ class Overlay(QWidget):
         else:
             max_height = int(screen_geo.height() * MAX_HEIGHT_RATIO)
             max_visible = max(1, (max_height - MARGIN_PX) // line_height)
-        total_lines = max(len(self._render_lines), 1)
+
+        # Wrap AFTER the width is settled: a narrowed panel turns one segment
+        # into several visual rows, and it is those rows that scrolling,
+        # height and painting all count -- not the logical lines.
+        text_width = max(1, width - 2 * MARGIN_PX)
+        self._wrapped_lines = [
+            _RenderLine(chunk, line.color)
+            for line in self._render_lines
+            for chunk in wrap_text(line.text, metrics, text_width)
+        ]
+
+        total_lines = max(len(self._wrapped_lines), 1)
         self._visible_lines = min(total_lines, max_visible)
-        max_offset = max(0, len(self._render_lines) - self._visible_lines)
+        max_offset = max(0, len(self._wrapped_lines) - self._visible_lines)
         if self._stick_to_bottom:
             self._scroll_offset = max_offset
         else:
@@ -476,7 +529,7 @@ class Overlay(QWidget):
 
     def scroll_by(self, lines: int) -> None:
         """Scroll the transcript by `lines` render lines (negative = older)."""
-        max_offset = max(0, len(self._render_lines) - self._visible_lines)
+        max_offset = max(0, len(self._wrapped_lines) - self._visible_lines)
         new_offset = max(0, min(max_offset, self._scroll_offset + lines))
         if new_offset == self._scroll_offset:
             return
@@ -504,16 +557,12 @@ class Overlay(QWidget):
         pen.setWidth(stroke_width)
 
         y = metrics.ascent() + MARGIN_PX // 2
-        max_text_width = max(1, self.width() - 2 * MARGIN_PX)
-        visible = self._render_lines[
+        visible = self._wrapped_lines[
             self._scroll_offset : self._scroll_offset + self._visible_lines
         ]
         for line in visible:
-            elided = metrics.elidedText(
-                line.text, Qt.TextElideMode.ElideRight, max_text_width
-            )
             path = QPainterPath()
-            path.addText(MARGIN_PX, y, self._font, elided)
+            path.addText(MARGIN_PX, y, self._font, line.text)
             painter.setPen(pen)
             painter.setBrush(line.color)
             painter.drawPath(path)
