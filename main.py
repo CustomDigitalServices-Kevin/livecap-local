@@ -530,6 +530,77 @@ def _build_live_overlay_class():
     return LiveOverlay
 
 
+def _wire_settings_panel(overlay, translator_thread, config):
+    """Build the gear panel and connect it to the live pipeline.
+
+    Every change is applied immediately (translator setters are thread-safe,
+    the overlay font is a Qt-thread call) and then persisted to
+    settings.local.yaml. A failed save is logged, never fatal: the setting is
+    already in effect, only its persistence was lost.
+
+    Returns the panel, which the caller must keep referenced -- it is a
+    top-level widget with no Qt parent, so dropping the reference would let
+    Python garbage-collect it and the gear button would open nothing.
+    """
+    from livecap import config as config_module
+    from livecap.settings_panel import SettingsPanel
+
+    panel = SettingsPanel(
+        model=config.translation.model,
+        context_turns=config.translation.context_turns,
+        target_lang=config.target_lang,
+        font_size=config.overlay.font_size,
+    )
+
+    def persist() -> None:
+        try:
+            # Resolved through the module on every call, not bound once at
+            # import: that keeps the save point patchable in tests, and a
+            # test that cannot substitute this call would silently assert
+            # nothing.
+            config_module.save_settings_override(panel.current_settings())
+        except (OSError, ConfigError) as exc:
+            logger.warning(
+                "Reglage applique mais non enregistre (%s): %s", type(exc).__name__, exc
+            )
+
+    def on_model(model: str) -> None:
+        translator_thread.set_model(model)
+        # The dialogue history was produced by the previous model; a different
+        # model should not be primed with another one's phrasing.
+        translator_thread.clear_context()
+        persist()
+
+    def on_context(turns: int) -> None:
+        translator_thread.set_context_turns(turns)
+        persist()
+
+    def on_lang(lang: str) -> None:
+        translator_thread.set_target_lang(lang)
+        persist()
+
+    def on_font(size: int) -> None:
+        overlay.set_font_size(size)
+        persist()
+
+    panel.model_changed.connect(on_model)
+    panel.context_turns_changed.connect(on_context)
+    panel.target_lang_changed.connect(on_lang)
+    panel.font_size_changed.connect(on_font)
+    panel.reset_geometry_requested.connect(overlay.reset_position)
+
+    def toggle_panel() -> None:
+        if panel.isVisible():
+            panel.hide()
+        else:
+            panel.show_next_to(overlay)
+
+    overlay.settings_requested.connect(toggle_panel)
+    # Qt.Tool popups are not closed by the app quitting on their own.
+    overlay.close_requested.connect(panel.close)
+    return panel
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -625,7 +696,11 @@ def run_input_wav_pipeline(
         end_of_stream=end_of_stream,
     )
     translator_thread = TranslatorThread(
-        segment_q, ui_q, target_lang=config.target_lang
+        segment_q,
+        ui_q,
+        target_lang=config.target_lang,
+        model=config.translation.model,
+        context_turns=config.translation.context_turns,
     )
     fanout_thread = UiFanoutThread(ui_q, transcript_logger, metrics)
     wav_feeder = WavFeederThread(wav_path, audio_q, end_of_stream)
@@ -694,7 +769,11 @@ def run_with_overlay(
         end_of_stream=end_of_stream,
     )
     translator_thread = TranslatorThread(
-        segment_q, ui_q, target_lang=config.target_lang
+        segment_q,
+        ui_q,
+        target_lang=config.target_lang,
+        model=config.translation.model,
+        context_turns=config.translation.context_turns,
     )
     fanout_thread = UiFanoutThread(
         ui_q, transcript_logger, metrics, overlay_ui_q=overlay_ui_q
@@ -729,6 +808,7 @@ def run_with_overlay(
     # not just hide the window (the capture and ASR threads are not owned by
     # Qt and would otherwise keep the process alive).
     overlay.close_requested.connect(_shutdown_and_quit)
+    settings_panel = _wire_settings_panel(overlay, translator_thread, config)
 
     asr_thread.start()
     translator_thread.start()
