@@ -276,3 +276,27 @@ par un second `QTimer` de `LiveOverlay` — jamais par `ui_q`.
   n'importe quel script Python sur cette machine (verifie avec un script sans
   aucun import) et etablit une connexion HTTPS externe : infrastructure de
   l'environnement de session, sans rapport avec le code de ce projet.
+
+## Licence
+
+GNU General Public License v3.0 (voir `LICENSE`).
+
+Ce choix est impose par une dependance, pas par preference : `PyQt6` est
+distribue par Riverbank Computing sous GPL v3 ou licence commerciale, et
+explicitement PAS sous LGPL
+(https://www.riverbankcomputing.com/software/pyqt/). Toute application qui
+l'embarque et qui est distribuee doit donc etre GPL v3, ou disposer d'une
+licence commerciale Riverbank.
+
+Les autres dependances sont permissives et ne contraignent rien :
+
+| Dependance | Licence |
+|------------|---------|
+| moshi, pyyaml | MIT |
+| torch, soundfile | BSD-3-Clause |
+| PyAudioWPatch | Apache-2.0 |
+| PyQt6 | **GPL v3 / commerciale** |
+
+Les modeles telecharges a l'execution (Kyutai `stt-1b-en_fr` via Hugging
+Face, `qwen3` via Ollama) ont leurs propres licences, independantes de
+celle de ce code.
