@@ -102,7 +102,9 @@ premiere cle manquante ou valeur invalide.
   sinon le process s'arrete en silence apres le chargement, exit 0, aucun
   transcript. A poser dans le code (`asr.py` ou `main.py`), pas seulement dans
   le launcher, pour que les tests/imports directs soient aussi proteges.
-- Ollama doit tourner en localhost:11434 avant `translator.py` ; gerer
+- Ollama doit tourner en 127.0.0.1:11434 avant `translator.py` (adresse
+  IPv4 litterale obligatoire : "localhost" resout en ::1 d'abord sous Windows
+  alors qu'Ollama n'ecoute qu'en IPv4, ce qui coute ~2 s par appel) ; gerer
   absence/arret avec message clair (tache 4).
 - `.vscode/settings.json` doit exclure `**/.venv/**` du watcher et de la
   recherche (tempete rg constatee le 2026-07-18 sur ce workspace).
