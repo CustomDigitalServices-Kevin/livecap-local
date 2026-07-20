@@ -6,7 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from livecap.config import ConfigError, load_config, parse_config
+import yaml
+
+from livecap.config import (
+    ConfigError,
+    load_config,
+    parse_config,
+    save_settings_override,
+)
+from livecap.translator import MAX_CONTEXT_TURNS
+from livecap.translator import MODEL as DEFAULT_MODEL
 
 VALID_RAW = {
     "target_lang": "fr",
@@ -19,6 +28,16 @@ VALID_RAW = {
     },
     "log_transcript": False,
 }
+
+
+def _valid_raw() -> dict:
+    """Copie independante de VALID_RAW (les tests ci-dessous la mutent)."""
+    return {
+        "target_lang": VALID_RAW["target_lang"],
+        "devices": dict(VALID_RAW["devices"]),
+        "overlay": dict(VALID_RAW["overlay"]),
+        "log_transcript": VALID_RAW["log_transcript"],
+    }
 
 
 def _with_override(section: str | None, key: str, value: object) -> dict:
@@ -148,3 +167,118 @@ def test_load_config_reads_repo_default(tmp_path: Path) -> None:
     repo_config = Path(__file__).resolve().parent.parent / "config.yaml"
     cfg = load_config(repo_config)
     assert cfg.target_lang in ("fr", "en")
+
+
+# --- section translation et persistance des reglages ----------------------
+
+
+def test_translation_section_defaults_when_absent() -> None:
+    """Un config.yaml anterieur au panneau reste valide."""
+    raw = _valid_raw()
+    raw.pop("translation", None)
+    config = parse_config(raw)
+
+    assert config.translation.model == DEFAULT_MODEL
+    assert config.translation.context_turns == 0
+
+
+def test_translation_section_is_parsed() -> None:
+    raw = _valid_raw()
+    raw["translation"] = {"model": "qwen3:14b-q4_K_M", "context_turns": 3}
+    config = parse_config(raw)
+
+    assert config.translation.model == "qwen3:14b-q4_K_M"
+    assert config.translation.context_turns == 3
+
+
+def test_translation_context_turns_out_of_range_rejected() -> None:
+    raw = _valid_raw()
+    raw["translation"] = {"context_turns": MAX_CONTEXT_TURNS + 1}
+    with pytest.raises(ConfigError, match="context_turns"):
+        parse_config(raw)
+
+
+def test_translation_model_must_be_non_empty_string() -> None:
+    raw = _valid_raw()
+    raw["translation"] = {"model": ""}
+    with pytest.raises(ConfigError, match="translation.model"):
+        parse_config(raw)
+
+
+def test_overrides_file_is_merged_over_config(tmp_path: Path) -> None:
+    base = tmp_path / "config.yaml"
+    base.write_text(yaml.safe_dump(_valid_raw()), encoding="utf-8")
+    override = tmp_path / "settings.local.yaml"
+    override.write_text(
+        yaml.safe_dump({"translation": {"context_turns": 4}, "target_lang": "en"}),
+        encoding="utf-8",
+    )
+
+    config = load_config(base, overrides_path=override)
+
+    assert config.target_lang == "en"
+    assert config.translation.context_turns == 4
+    # Les cles non surchargees viennent toujours de config.yaml.
+    assert config.overlay.position == _valid_raw()["overlay"]["position"]
+
+
+def test_missing_overrides_file_is_not_an_error(tmp_path: Path) -> None:
+    base = tmp_path / "config.yaml"
+    base.write_text(yaml.safe_dump(_valid_raw()), encoding="utf-8")
+
+    config = load_config(base, overrides_path=tmp_path / "absent.yaml")
+
+    assert config.target_lang == _valid_raw()["target_lang"]
+
+
+def test_save_settings_override_round_trips(tmp_path: Path) -> None:
+    base = tmp_path / "config.yaml"
+    base.write_text(yaml.safe_dump(_valid_raw()), encoding="utf-8")
+    override = tmp_path / "settings.local.yaml"
+
+    save_settings_override(
+        {"translation": {"model": "qwen3:14b-q4_K_M", "context_turns": 2}},
+        overrides_path=override,
+        base_path=base,
+    )
+
+    assert override.is_file()
+    config = load_config(base, overrides_path=override)
+    assert config.translation.model == "qwen3:14b-q4_K_M"
+    assert config.translation.context_turns == 2
+
+
+def test_save_settings_override_merges_with_existing(tmp_path: Path) -> None:
+    """Enregistrer la police ne doit pas effacer le modele deja enregistre."""
+    base = tmp_path / "config.yaml"
+    base.write_text(yaml.safe_dump(_valid_raw()), encoding="utf-8")
+    override = tmp_path / "settings.local.yaml"
+
+    save_settings_override(
+        {"translation": {"model": "qwen3:14b-q4_K_M"}},
+        overrides_path=override,
+        base_path=base,
+    )
+    save_settings_override(
+        {"overlay": {"font_size": 30}}, overrides_path=override, base_path=base
+    )
+
+    config = load_config(base, overrides_path=override)
+    assert config.translation.model == "qwen3:14b-q4_K_M"
+    assert config.overlay.font_size == 30
+
+
+def test_save_settings_override_rejects_invalid_value(tmp_path: Path) -> None:
+    """Une valeur invalide ne doit jamais atterrir dans le fichier."""
+    base = tmp_path / "config.yaml"
+    base.write_text(yaml.safe_dump(_valid_raw()), encoding="utf-8")
+    override = tmp_path / "settings.local.yaml"
+
+    with pytest.raises(ConfigError):
+        save_settings_override(
+            {"translation": {"context_turns": 99}},
+            overrides_path=override,
+            base_path=base,
+        )
+
+    assert not override.exists()
