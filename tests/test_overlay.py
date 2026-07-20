@@ -387,3 +387,112 @@ def test_overlay_quit_shortcut_wired_to_request_close(qtbot: object) -> None:
 
     assert emitted == [True]
     overlay.shutdown()
+
+
+# --- roue dentee et taille de police a chaud -------------------------------
+
+
+def test_gear_button_inside_panel_and_disjoint_from_other_hit_areas(
+    qtbot: object,
+) -> None:
+    """La roue ne doit chevaucher ni la croix ni la poignee de redimensionnement."""
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+    overlay._manual_size = (600, 300)
+    overlay._relayout()
+
+    gear = overlay.gear_button_rect()
+    assert overlay.rect().contains(gear)
+    assert not gear.intersects(overlay.close_button_rect())
+    assert not gear.intersects(overlay.resize_grip_rect())
+    # La roue est a GAUCHE de la croix (ordre visuel attendu).
+    assert gear.right() < overlay.close_button_rect().left()
+    overlay.shutdown()
+
+
+def test_clicking_gear_emits_settings_requested(qtbot: object) -> None:
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+    emitted: list[bool] = []
+    overlay.settings_requested.connect(lambda: emitted.append(True))
+
+    qtbot.mouseClick(  # type: ignore[attr-defined]
+        overlay,
+        Qt.MouseButton.LeftButton,
+        pos=overlay.gear_button_rect().center(),
+    )
+
+    assert emitted == [True]
+    overlay.shutdown()
+
+
+def test_clicking_gear_does_not_close_the_overlay(qtbot: object) -> None:
+    """Les zones sont voisines: un clic roue ne doit jamais fermer l'outil."""
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+    closed: list[bool] = []
+    overlay.close_requested.connect(lambda: closed.append(True))
+
+    qtbot.mouseClick(  # type: ignore[attr-defined]
+        overlay,
+        Qt.MouseButton.LeftButton,
+        pos=overlay.gear_button_rect().center(),
+    )
+
+    assert closed == []
+    overlay.shutdown()
+
+
+def test_clicking_gear_does_not_start_a_drag(qtbot: object) -> None:
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+
+    qtbot.mousePress(  # type: ignore[attr-defined]
+        overlay,
+        Qt.MouseButton.LeftButton,
+        pos=overlay.gear_button_rect().center(),
+    )
+
+    assert overlay._drag_origin is None
+    assert overlay._manual_anchor is None
+    overlay.shutdown()
+
+
+def test_set_font_size_updates_font_and_config(qtbot: object) -> None:
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(font_size=22), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+
+    overlay.set_font_size(34)
+
+    assert overlay._font.pointSize() == 34
+    # config.font_size pilote l'epaisseur du contour dans paintEvent: il doit suivre.
+    assert overlay._config.font_size == 34
+    overlay.shutdown()
+
+
+def test_set_font_size_rejects_non_positive(qtbot: object) -> None:
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError):
+        overlay.set_font_size(0)
+    overlay.shutdown()
+
+
+def test_set_font_size_relayouts_taller_lines(qtbot: object) -> None:
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(font_size=14), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+    _fill(overlay, ui_q, 2)
+    small_height = overlay.height()
+
+    overlay.set_font_size(40)
+
+    assert overlay.height() > small_height
+    overlay.shutdown()
