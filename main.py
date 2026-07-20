@@ -725,6 +725,10 @@ def run_with_overlay(
     sigint_pump.start(200)
 
     app.aboutToQuit.connect(pipeline.shutdown)
+    # The overlay's X button / Ctrl+Alt+Q must tear down the whole pipeline,
+    # not just hide the window (the capture and ASR threads are not owned by
+    # Qt and would otherwise keep the process alive).
+    overlay.close_requested.connect(_shutdown_and_quit)
 
     asr_thread.start()
     translator_thread.start()
