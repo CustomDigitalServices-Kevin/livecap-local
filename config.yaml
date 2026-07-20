@@ -19,7 +19,10 @@ overlay:
   # Si true, l'overlay laisse passer les clics souris (WS_EX_TRANSPARENT).
   click_through: false
   # Nombre de segments precedents conserves a l'affichage sous la ligne active.
-  history: 3
+  # L'overlay affiche au plus 45% de la hauteur d'ecran et devient scrollable
+  # a la molette au-dela : cette valeur borne la profondeur d'historique
+  # remontable pendant une reunion.
+  history: 400
 
 # Si true, ecrit le transcript horodate (VO + traduction) dans transcripts/.
 log_transcript: false
