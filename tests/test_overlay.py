@@ -233,3 +233,157 @@ def test_overlay_shortcut_configured_and_wired_to_toggle_pause(qtbot: object) ->
     assert overlay._paused is True
 
     overlay.shutdown()
+
+
+# --- scrolling, dragging, resizing, closing --------------------------------
+
+
+def _fill(overlay: Overlay, ui_q: "queue.Queue[TranslatedSegment]", count: int) -> None:
+    """Push `count` segments through the overlay, draining as we go.
+
+    make_ui_queue() is bounded (maxsize=32, see livecap/contract.py), so a
+    naive fill of more than 32 items would block the producer forever: the
+    only consumer is _poll_ui_queue, which we call here rather than relying
+    on the widget's QTimer (no event loop is spun in these tests).
+    """
+    for i in range(count):
+        ui_q.put(_translated(f"english {i}", f"francais {i}"))
+        if ui_q.full():
+            overlay._poll_ui_queue()
+    overlay._poll_ui_queue()
+
+
+def test_overlay_keeps_long_history_and_caps_visible_lines(qtbot: object) -> None:
+    """With a large history the panel stops growing and scrolls instead."""
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(history=400), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+
+    _fill(overlay, ui_q, 200)
+
+    assert len(overlay._render_lines) > overlay._visible_lines
+    # Auto-follow keeps the newest line in the viewport.
+    assert overlay._stick_to_bottom is True
+    assert overlay._scroll_offset == len(overlay._render_lines) - overlay._visible_lines
+    overlay.shutdown()
+
+
+def test_overlay_scroll_up_disables_autofollow_and_bottom_rearms_it(
+    qtbot: object,
+) -> None:
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(history=400), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+    _fill(overlay, ui_q, 100)
+    bottom = overlay._scroll_offset
+
+    overlay.scroll_by(-10)
+    assert overlay._scroll_offset == bottom - 10
+    assert overlay._stick_to_bottom is False
+
+    overlay.scroll_by(1000)  # clamped to the bottom
+    assert overlay._scroll_offset == bottom
+    assert overlay._stick_to_bottom is True
+    overlay.shutdown()
+
+
+def test_overlay_scroll_offset_clamped_to_zero(qtbot: object) -> None:
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(history=400), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+    _fill(overlay, ui_q, 50)
+
+    overlay.scroll_by(-10_000)
+    assert overlay._scroll_offset == 0
+    overlay.shutdown()
+
+
+def test_overlay_manual_anchor_survives_relayout(qtbot: object) -> None:
+    """A dragged panel keeps its own bottom anchor as new segments arrive."""
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(history=400), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+
+    overlay.move(300, 200)
+    overlay._remember_manual_anchor()
+    anchor = overlay._manual_anchor
+    assert anchor is not None
+
+    _fill(overlay, ui_q, 5)
+
+    assert overlay.x() == anchor[0]
+    assert overlay.y() + overlay.height() == anchor[1]
+    overlay.shutdown()
+
+
+def test_overlay_reset_position_clears_manual_anchor_and_size(qtbot: object) -> None:
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+
+    overlay.move(500, 400)
+    overlay._remember_manual_anchor()
+    overlay._manual_size = (400, 300)
+
+    overlay.reset_position()
+
+    assert overlay._manual_anchor is None
+    assert overlay._manual_size is None
+    overlay.shutdown()
+
+
+def test_overlay_manual_size_overrides_content_geometry(qtbot: object) -> None:
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(history=400), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+    _fill(overlay, ui_q, 3)
+
+    overlay._manual_size = (640, 320)
+    overlay._relayout()
+
+    assert overlay.width() == 640
+    assert overlay.height() == 320
+    overlay.shutdown()
+
+
+def test_overlay_close_button_and_grip_are_inside_the_panel(qtbot: object) -> None:
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+    overlay._manual_size = (600, 300)
+    overlay._relayout()
+
+    assert overlay.rect().contains(overlay.close_button_rect())
+    assert overlay.rect().contains(overlay.resize_grip_rect())
+    # The two hit areas must never overlap, or the X would also resize.
+    assert not overlay.close_button_rect().intersects(overlay.resize_grip_rect())
+    overlay.shutdown()
+
+
+def test_overlay_request_close_emits_signal(qtbot: object) -> None:
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+
+    emitted: list[bool] = []
+    overlay.close_requested.connect(lambda: emitted.append(True))
+
+    overlay.request_close()
+
+    assert emitted == [True]
+    overlay.shutdown()
+
+
+def test_overlay_quit_shortcut_wired_to_request_close(qtbot: object) -> None:
+    ui_q = make_ui_queue()
+    overlay = Overlay(_config(), ui_q, poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+
+    emitted: list[bool] = []
+    overlay.close_requested.connect(lambda: emitted.append(True))
+
+    assert overlay._quit_shortcut.key() == QKeySequence("Ctrl+Alt+Q")
+    overlay._quit_shortcut.activated.emit()
+
+    assert emitted == [True]
+    overlay.shutdown()
