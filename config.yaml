@@ -26,3 +26,15 @@ overlay:
 
 # Si true, ecrit le transcript horodate (VO + traduction) dans transcripts/.
 log_transcript: false
+
+# Traduction. Modifiable en cours de session via la roue dentee de l'overlay ;
+# ce que tu y choisis est enregistre dans settings.local.yaml (fusionne
+# par-dessus ce fichier au demarrage, supprimer ce fichier annule tes choix).
+translation:
+  # qwen3:4b-instruct  : ~126 ms, tient en VRAM avec l'ASR charge.
+  # qwen3:14b-q4_K_M   : meilleurs pronoms, mais ~351 ms avec l'ASR charge
+  #                      et VRAM a 94% (Ollama bascule 11% sur CPU).
+  model: qwen3:4b-instruct
+  # Phrases precedentes rejouees comme contexte (0 a 5). Aide les termes
+  # ambigus (board = conseil), sans effet mesurable sur le reste.
+  context_turns: 0
