@@ -42,7 +42,7 @@ import logging
 import queue
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QRect, Qt, QTimer
+from PyQt6.QtCore import QPoint, QRect, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -62,15 +62,26 @@ from livecap.contract import TranslatedSegment
 logger = logging.getLogger(__name__)
 
 MAX_WIDTH_RATIO = 0.75  # fraction of screen width the overlay may occupy
+MAX_HEIGHT_RATIO = 0.45  # fraction of screen height the overlay may occupy
 MARGIN_PX = 24
 LINE_SPACING_PX = 6
 OUTLINE_WIDTH_RATIO = 0.10  # stroke width as a fraction of font_size
 VO_COLOR = QColor(255, 255, 255)
 TRANSLATION_COLOR = QColor(255, 221, 87)
 OUTLINE_COLOR = QColor(0, 0, 0)
+BACKGROUND_COLOR = QColor(0, 0, 0, 235)  # opaque black panel behind the text
+BACKGROUND_RADIUS_PX = 10
 CURRENT_ALPHA = 255
-HISTORY_ALPHA = 150
+HISTORY_ALPHA = 200
+CHROME_COLOR = QColor(255, 255, 255, 130)  # close button + resize grip strokes
+CHROME_HOVER_COLOR = QColor(255, 120, 120)
+CLOSE_BUTTON_PX = 18  # side of the square hit area, top-right of the panel
+RESIZE_GRIP_PX = 18  # side of the square hit area, bottom-right of the panel
+MIN_WIDTH_PX = 240
+MIN_HEIGHT_PX = 60
 DEFAULT_PAUSE_SHORTCUT = "Ctrl+Alt+P"
+DEFAULT_RESET_POSITION_SHORTCUT = "Ctrl+Alt+R"
+DEFAULT_QUIT_SHORTCUT = "Ctrl+Alt+Q"
 DEFAULT_POLL_INTERVAL_MS = 50
 FALLBACK_SCREEN_RECT = QRect(0, 0, 1920, 1080)  # used only if no screen is reported
 
@@ -116,6 +127,16 @@ class _RenderLine:
 class Overlay(QWidget):
     """Borderless always-on-top subtitle overlay. See module docstring."""
 
+    #: Emitted when the user asks to close the overlay (X button or quit
+    #: shortcut). main.py connects it to QApplication.quit so the whole
+    #: pipeline shuts down through the existing aboutToQuit handler.
+    #: Closing the widget is NOT relied on to end the process: Qt only
+    #: auto-quits on "the last visible primary window"
+    #: (https://doc.qt.io/qt-6/qguiapplication.html#quitOnLastWindowClosed-prop),
+    #: and --no-overlay/embedded callers may own other windows, so the quit
+    #: is requested explicitly rather than inferred from window bookkeeping.
+    close_requested = pyqtSignal()
+
     def __init__(
         self,
         config: OverlayConfig,
@@ -131,6 +152,22 @@ class Overlay(QWidget):
         self._history: list[TranslatedSegment] = []
         self._render_lines: list[_RenderLine] = []
         self._paused = False
+        # Scroll state: _scroll_offset is the index of the first VISIBLE render
+        # line. _stick_to_bottom keeps the newest segment in view until the user
+        # scrolls up; scrolling back to the bottom re-arms the auto-follow.
+        self._scroll_offset = 0
+        self._visible_lines = 1
+        self._stick_to_bottom = True
+        # Drag state: _manual_anchor is None until the user moves the panel by
+        # hand; from then on _relayout honours it instead of config.position.
+        self._drag_origin = None
+        self._manual_anchor: tuple[int, int] | None = None
+        # Resize state: _manual_size overrides the content-driven width/height
+        # once the user drags the bottom-right grip.
+        self._resize_origin: tuple[QPoint, int, int] | None = None
+        self._manual_size: tuple[int, int] | None = None
+        self._close_hovered = False
+        self.setMouseTracking(True)  # needed for close-button hover feedback
 
         flags = (
             Qt.WindowType.FramelessWindowHint
@@ -156,6 +193,16 @@ class Overlay(QWidget):
         # instead of "this exact top-level widget is active".
         self._pause_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._pause_shortcut.activated.connect(self.toggle_pause)
+
+        self._reset_position_shortcut = QShortcut(
+            QKeySequence(DEFAULT_RESET_POSITION_SHORTCUT), self
+        )
+        self._reset_position_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._reset_position_shortcut.activated.connect(self.reset_position)
+
+        self._quit_shortcut = QShortcut(QKeySequence(DEFAULT_QUIT_SHORTCUT), self)
+        self._quit_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._quit_shortcut.activated.connect(self.request_close)
 
         self._timer = QTimer(self)
         self._timer.setInterval(poll_interval_ms)
@@ -232,9 +279,36 @@ class Overlay(QWidget):
             if self._render_lines
             else max_width
         )
-        height = max(len(self._render_lines), 1) * line_height + MARGIN_PX
+
+        # The panel grows with the transcript until MAX_HEIGHT_RATIO of the
+        # screen, then stops growing and becomes a scrollable viewport. Once
+        # the user has resized it by hand, their size wins outright.
+        if self._manual_size is not None:
+            width, manual_height = self._manual_size
+            max_visible = max(1, (manual_height - MARGIN_PX) // line_height)
+        else:
+            max_height = int(screen_geo.height() * MAX_HEIGHT_RATIO)
+            max_visible = max(1, (max_height - MARGIN_PX) // line_height)
+        total_lines = max(len(self._render_lines), 1)
+        self._visible_lines = min(total_lines, max_visible)
+        max_offset = max(0, len(self._render_lines) - self._visible_lines)
+        if self._stick_to_bottom:
+            self._scroll_offset = max_offset
+        else:
+            self._scroll_offset = min(self._scroll_offset, max_offset)
+        if self._manual_size is not None:
+            height = self._manual_size[1]
+        else:
+            height = self._visible_lines * line_height + MARGIN_PX
 
         self.resize(width, height)
+        if self._manual_anchor is not None:
+            # The user dragged the panel: keep THEIR anchor, not the configured
+            # one, so the block still grows away from the same edge.
+            ax, ay = self._manual_anchor
+            y = ay if self._config.position.startswith("top") else ay - height
+            self.move(ax, y)
+            return
         x, y = compute_geometry(
             self._config.position,
             width,
@@ -244,9 +318,146 @@ class Overlay(QWidget):
         )
         self.move(screen_geo.x() + x, screen_geo.y() + y)
 
+    def _remember_manual_anchor(self) -> None:
+        """Freeze the current position as the anchor used by _relayout."""
+        if self._config.position.startswith("top"):
+            self._manual_anchor = (self.x(), self.y())
+        else:
+            self._manual_anchor = (self.x(), self.y() + self.height())
+
+    def reset_position(self) -> None:
+        """Forget the dragged position AND size, back to the configured defaults."""
+        self._manual_anchor = None
+        self._manual_size = None
+        self._relayout()
+        self.update()
+
+    def request_close(self) -> None:
+        """Ask the host application to shut down, then hide the overlay."""
+        logger.info("Fermeture demandee depuis l'overlay")
+        self.close_requested.emit()
+        self.close()
+
+    def close_button_rect(self) -> QRect:
+        """Hit area of the X button (top-right corner of the panel)."""
+        return QRect(
+            self.width() - CLOSE_BUTTON_PX - MARGIN_PX // 3,
+            MARGIN_PX // 3,
+            CLOSE_BUTTON_PX,
+            CLOSE_BUTTON_PX,
+        )
+
+    def resize_grip_rect(self) -> QRect:
+        """Hit area of the resize grip (bottom-right corner of the panel)."""
+        return QRect(
+            self.width() - RESIZE_GRIP_PX,
+            self.height() - RESIZE_GRIP_PX,
+            RESIZE_GRIP_PX,
+            RESIZE_GRIP_PX,
+        )
+
+    def mousePressEvent(self, event) -> None:  # noqa: ANN001 (Qt override signature)
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        pos = event.position().toPoint()
+        if self.close_button_rect().contains(pos):
+            self.request_close()
+            event.accept()
+            return
+        if self.resize_grip_rect().contains(pos):
+            self._resize_origin = (
+                event.globalPosition().toPoint(),
+                self.width(),
+                self.height(),
+            )
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            event.accept()
+            return
+        self._drag_origin = (
+            event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        )
+        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: ANN001 (Qt override signature)
+        pos = event.position().toPoint()
+        if self._resize_origin is not None:
+            if not (event.buttons() & Qt.MouseButton.LeftButton):
+                return
+            origin, start_w, start_h = self._resize_origin
+            delta = event.globalPosition().toPoint() - origin
+            self._manual_size = (
+                max(MIN_WIDTH_PX, start_w + delta.x()),
+                max(MIN_HEIGHT_PX, start_h + delta.y()),
+            )
+            self._relayout()
+            self.update()
+            event.accept()
+            return
+        if self._drag_origin is not None:
+            if not (event.buttons() & Qt.MouseButton.LeftButton):
+                return
+            self.move(event.globalPosition().toPoint() - self._drag_origin)
+            event.accept()
+            return
+        # Idle hover: highlight the X and show the resize cursor on the grip.
+        hovered = self.close_button_rect().contains(pos)
+        if hovered != self._close_hovered:
+            self._close_hovered = hovered
+            self.update()
+        if self.resize_grip_rect().contains(pos):
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        elif hovered:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001 (Qt override signature)
+        if self._resize_origin is not None:
+            self._resize_origin = None
+            self.unsetCursor()
+            # Resizing from the bottom-right moves the bottom edge, so the
+            # anchor must follow or the next relayout would snap it back.
+            self._remember_manual_anchor()
+            event.accept()
+            return
+        if self._drag_origin is None:
+            return
+        self._drag_origin = None
+        self.unsetCursor()
+        self._remember_manual_anchor()
+        event.accept()
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001 (Qt override signature)
+        if self._close_hovered:
+            self._close_hovered = False
+            self.update()
+        self.unsetCursor()
+
+    def scroll_by(self, lines: int) -> None:
+        """Scroll the transcript by `lines` render lines (negative = older)."""
+        max_offset = max(0, len(self._render_lines) - self._visible_lines)
+        new_offset = max(0, min(max_offset, self._scroll_offset + lines))
+        if new_offset == self._scroll_offset:
+            return
+        self._scroll_offset = new_offset
+        # Re-arm auto-follow only once the user is back at the newest line.
+        self._stick_to_bottom = new_offset >= max_offset
+        self.update()
+
+    def wheelEvent(self, event) -> None:  # noqa: ANN001 (Qt override signature)
+        # angleDelta is in 1/8 degree units; one notch = 120 units = 3 lines,
+        # matching the Qt default scroll step.
+        notches = event.angleDelta().y() / 120.0
+        self.scroll_by(int(-notches * 3) or (-1 if notches > 0 else 1))
+        event.accept()
+
     def paintEvent(self, event: object) -> None:  # noqa: ARG002 (Qt override signature)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(BACKGROUND_COLOR)
+        painter.drawRoundedRect(self.rect(), BACKGROUND_RADIUS_PX, BACKGROUND_RADIUS_PX)
         metrics = QFontMetrics(self._font)
         stroke_width = max(1, int(self._config.font_size * OUTLINE_WIDTH_RATIO))
         pen = QPen(OUTLINE_COLOR)
@@ -254,7 +465,10 @@ class Overlay(QWidget):
 
         y = metrics.ascent() + MARGIN_PX // 2
         max_text_width = max(1, self.width() - 2 * MARGIN_PX)
-        for line in self._render_lines:
+        visible = self._render_lines[
+            self._scroll_offset : self._scroll_offset + self._visible_lines
+        ]
+        for line in visible:
             elided = metrics.elidedText(
                 line.text, Qt.TextElideMode.ElideRight, max_text_width
             )
@@ -264,7 +478,43 @@ class Overlay(QWidget):
             painter.setBrush(line.color)
             painter.drawPath(path)
             y += self._line_height
+
+        self._paint_chrome(painter)
         painter.end()
+
+    def _paint_chrome(self, painter: QPainter) -> None:
+        """Draw the close button and the resize grip over the panel."""
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        close_rect = self.close_button_rect()
+        close_pen = QPen(CHROME_HOVER_COLOR if self._close_hovered else CHROME_COLOR)
+        close_pen.setWidth(2)
+        painter.setPen(close_pen)
+        inset = 4
+        painter.drawLine(
+            close_rect.left() + inset,
+            close_rect.top() + inset,
+            close_rect.right() - inset,
+            close_rect.bottom() - inset,
+        )
+        painter.drawLine(
+            close_rect.right() - inset,
+            close_rect.top() + inset,
+            close_rect.left() + inset,
+            close_rect.bottom() - inset,
+        )
+
+        grip_rect = self.resize_grip_rect()
+        grip_pen = QPen(CHROME_COLOR)
+        grip_pen.setWidth(2)
+        painter.setPen(grip_pen)
+        for offset in (4, 9, 14):
+            painter.drawLine(
+                grip_rect.right() - offset,
+                grip_rect.bottom() - 2,
+                grip_rect.right() - 2,
+                grip_rect.bottom() - offset,
+            )
 
     def closeEvent(self, event: object) -> None:  # noqa: ARG002 (Qt override signature)
         self.shutdown()
