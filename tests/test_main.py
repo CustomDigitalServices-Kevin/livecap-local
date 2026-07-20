@@ -330,3 +330,156 @@ def test_live_overlay_partial_ignored_while_paused(qtbot: object) -> None:
     assert overlay._partial_text == ""  # type: ignore[attr-defined]
     assert not partial_q.empty()
     overlay.shutdown()
+
+
+# --- cablage du panneau de reglages (roue dentee) --------------------------
+
+
+class _FakeTranslator:
+    """Double du TranslatorThread: enregistre ce que le panneau lui demande."""
+
+    def __init__(self) -> None:
+        self.model: str | None = None
+        self.context_turns: int | None = None
+        self.target_lang: str | None = None
+        self.cleared = 0
+
+    def set_model(self, model: str) -> None:
+        self.model = model
+
+    def set_context_turns(self, turns: int) -> None:
+        self.context_turns = turns
+
+    def set_target_lang(self, lang: str) -> None:
+        self.target_lang = lang
+
+    def clear_context(self) -> None:
+        self.cleared += 1
+
+
+def _config_for_panel() -> "main.LiveCapConfig":
+    from livecap.config import (
+        DevicesConfig,
+        LiveCapConfig,
+        TranslationConfig,
+    )
+
+    return LiveCapConfig(
+        target_lang="fr",
+        devices=DevicesConfig(loopback="auto", mic="auto"),
+        overlay=OverlayConfig(
+            position="bottom-center", font_size=22, click_through=False, history=3
+        ),
+        log_transcript=False,
+        translation=TranslationConfig(model="qwen3:4b-instruct", context_turns=0),
+    )
+
+
+@pytest.fixture
+def panel_env(qtbot: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Overlay reel + faux translator, avec persistance redirigee vers tmp_path."""
+    from livecap.overlay import Overlay
+
+    overlay = Overlay(_config_for_panel().overlay, make_ui_queue(), poll_interval_ms=20)
+    qtbot.addWidget(overlay)  # type: ignore[attr-defined]
+    translator = _FakeTranslator()
+
+    saved: list[dict] = []
+
+    def fake_save(settings: dict, **kwargs: object) -> Path:
+        saved.append(settings)
+        return tmp_path / "settings.local.yaml"
+
+    monkeypatch.setattr("livecap.config.save_settings_override", fake_save)
+    panel = main._wire_settings_panel(overlay, translator, _config_for_panel())
+    qtbot.addWidget(panel)  # type: ignore[attr-defined]
+    yield overlay, translator, panel, saved
+    overlay.shutdown()
+
+
+def test_gear_signal_opens_and_closes_the_panel(panel_env) -> None:
+    overlay, _translator, panel, _saved = panel_env
+    assert not panel.isVisible()
+
+    overlay.settings_requested.emit()
+    assert panel.isVisible()
+
+    overlay.settings_requested.emit()
+    assert not panel.isVisible()
+
+
+def test_panel_model_change_reaches_the_translator(panel_env) -> None:
+    _overlay, translator, panel, saved = panel_env
+
+    panel.model_combo.setCurrentIndex(1)
+
+    from livecap.translator import MODEL_CHOICES
+
+    assert translator.model == MODEL_CHOICES[1][0]
+    # Changer de modele doit purger l'historique de l'ancien.
+    assert translator.cleared == 1
+    assert saved, "le changement doit etre persiste"
+
+
+def test_panel_context_change_reaches_the_translator(panel_env) -> None:
+    _overlay, translator, panel, saved = panel_env
+
+    panel.context_spin.setValue(3)
+
+    assert translator.context_turns == 3
+    assert saved
+
+
+def test_panel_lang_change_reaches_the_translator(panel_env) -> None:
+    _overlay, translator, panel, saved = panel_env
+
+    panel.lang_combo.setCurrentIndex(panel.lang_combo.findData("en"))
+
+    assert translator.target_lang == "en"
+    assert saved
+
+
+def test_panel_font_change_reaches_the_overlay(panel_env) -> None:
+    overlay, _translator, panel, saved = panel_env
+
+    panel.font_spin.setValue(30)
+
+    assert overlay._font.pointSize() == 30
+    assert saved
+
+
+def test_panel_reset_button_clears_manual_geometry(panel_env) -> None:
+    overlay, _translator, panel, _saved = panel_env
+    overlay.move(400, 300)
+    overlay._remember_manual_anchor()
+    overlay._manual_size = (500, 200)
+
+    panel.reset_geometry_requested.emit()
+
+    assert overlay._manual_anchor is None
+    assert overlay._manual_size is None
+
+
+def test_failed_persistence_does_not_break_the_setting(
+    panel_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Un disque plein ne doit pas empecher le reglage de s'appliquer.
+
+    Le compteur d'appels n'est pas decoratif: sans lui, ce test passe meme
+    si la sauvegarde n'est jamais tentee (verifie en cassant volontairement
+    la resolution de save_settings_override), donc il n'assurerait rien.
+    """
+    _overlay, translator, panel, _saved = panel_env
+    calls: list[dict] = []
+
+    def boom(settings: dict, **kwargs: object) -> Path:
+        calls.append(settings)
+        raise OSError("disque plein")
+
+    monkeypatch.setattr("livecap.config.save_settings_override", boom)
+
+    panel.context_spin.setValue(2)
+
+    assert calls, "la sauvegarde doit avoir ete tentee"
+    # L'OSError est absorbee: le reglage reste applique.
+    assert translator.context_turns == 2
